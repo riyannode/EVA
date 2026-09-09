@@ -171,6 +171,17 @@ def test_mutation_prompt_semantic_guard(change, monkeypatch, tmp_path):
     assert result.category == parent.category
 
 
+def test_mutation_difficulty_parity_without_qwen(monkeypatch, tmp_path):
+    parent = scenario(Category.SIZE_LIMIT, difficulty=2)
+    fallback = qwen.mutate_scenario(parent, "SIZE_VIOLATION", config_for(tmp_path), 2)
+    assert fallback.model == "deterministic-fallback"
+    assert fallback.difficulty == parent.difficulty == 2
+    monkeypatch.setattr(qwen, "_request_json", lambda *args: parent.model_dump(mode="json"))
+    generated = qwen.mutate_scenario(parent, "SIZE_VIOLATION", config_for(tmp_path, "key"), 2)
+    assert generated.model != "deterministic-fallback"
+    assert generated.difficulty == fallback.difficulty
+
+
 def test_prompt_critic_transport_failure_is_unverified(monkeypatch, tmp_path):
     def fail(*args):
         raise RuntimeError("OFFLINE_FAILURE")

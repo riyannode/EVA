@@ -171,7 +171,7 @@ def critic(scenario: Scenario, trace: list[ToolTrace], decision: Decision | None
 
 
 def _fallback_mutation(parent: Scenario, failure: str, seed: int) -> Scenario:
-    updates: dict[str, object] = {"scenario_id": f"scenario-{seed}", "parent_scenario_id": parent.scenario_id, "mutation_reason": failure, "difficulty": min(5, parent.difficulty + 1), "source_labels": [VerificationLabel.SYNTHETIC_MUTATION], "model": "deterministic-fallback", "prompt_name": MUTATION_PROMPT, "prompt_version": PROMPT_VERSION, "seed": seed}
+    updates: dict[str, object] = {"scenario_id": f"scenario-{seed}", "parent_scenario_id": parent.scenario_id, "mutation_reason": failure, "difficulty": parent.difficulty, "source_labels": [VerificationLabel.SYNTHETIC_MUTATION], "model": "deterministic-fallback", "prompt_name": MUTATION_PROMPT, "prompt_version": PROMPT_VERSION, "seed": seed}
     if failure in {"CONFLICT_IGNORED", "FALSE_AUTONOMY"}:
         updates["portfolio"] = parent.portfolio.model_copy(update={"exposure": max(parent.portfolio.exposure, parent.policy.max_exposure - Decimal("25"))})
         updates["requires_takeover"] = True
