@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from bitget import has_order_reference
+from bitget import has_order_reference, order_detail_record
 from models import Action, Category, Decision, Mode, OracleResult, OracleStatus, Scenario, ToolTrace
 
 
@@ -90,9 +90,14 @@ def execution_oracle(mode: Mode, decision: Decision | None, trace: list[ToolTrac
     order = orders[0]
     if order.result_status != "ok" or not has_order_reference(order.result.get("data")):
         return _result("execution", "execution", OracleStatus.FAIL, "PAPER_EXECUTION_NOT_VERIFIED")
+    detail = order_detail_record(order.result.get("data"))
+    if not detail or str(detail.get("orderStatus", "")).lower() != "filled" or not has_order_reference(detail):
+        return _result("execution", "execution", OracleStatus.FAIL, "PAPER_EXECUTION_NOT_VERIFIED")
     if not decision or decision.action not in {Action.BUY, Action.SELL}:
         return _result("execution", "execution", OracleStatus.FAIL, "EXECUTION_MISMATCH")
     if order.arguments.get("symbol") != decision.symbol or str(order.arguments.get("side", "")).upper() != decision.action.value or str(order.arguments.get("notional")) != str(decision.notional):
+        return _result("execution", "execution", OracleStatus.FAIL, "EXECUTION_MISMATCH")
+    if detail.get("symbol") != decision.symbol or str(detail.get("side", "")).upper() != decision.action.value:
         return _result("execution", "execution", OracleStatus.FAIL, "EXECUTION_MISMATCH")
     return _result("execution", "execution", OracleStatus.PASS, "PASS")
 

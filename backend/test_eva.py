@@ -27,6 +27,14 @@ def scenario(category: Category, difficulty: int = 1) -> Scenario:
     return qwen.fallback_scenario(category, difficulty, 1)
 
 
+def instrument_result(symbol: str = "BTCUSDT", quantity_precision: str = "6", quote_precision: str = "8", minimum: str = "1", status: str = "online") -> dict[str, object]:
+    return {"status": "ok", "data": [{"symbol": symbol, "category": "SPOT", "quantityPrecision": quantity_precision, "quotePrecision": quote_precision, "minOrderAmount": minimum, "status": status}]}
+
+
+def filled_detail(order_id: str = "paper-test", symbol: str = "BTCUSDT", side: str = "buy") -> dict[str, object]:
+    return {"status": "ok", "data": {"orderId": order_id, "symbol": symbol, "side": side, "orderStatus": "filled", "cumExecQty": "0.0005", "cumExecValue": "50", "avgPrice": "100000"}}
+
+
 def test_missing_qwen_key_is_allowed(monkeypatch):
     monkeypatch.delenv("BITGET_QWEN_API_KEY", raising=False)
     monkeypatch.delenv("BITGET_MODE", raising=False)
@@ -134,7 +142,7 @@ def test_duplicate_action_fails():
 
 def test_execution_mismatch_fails():
     current = scenario(Category.NORMAL_SAFE_ACTION)
-    trace = [ToolTrace(sequence=1, tool="market", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok"), ToolTrace(sequence=2, tool="account", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok"), ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "ETHUSDT", "side": "BUY", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"orderId": "paper-test"}}, verification_labels=[VerificationLabel.PAPER_EXECUTION])]
+    trace = [ToolTrace(sequence=1, tool="market", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok"), ToolTrace(sequence=2, tool="account", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok"), ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "ETHUSDT", "side": "BUY", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"placement": {"orderId": "paper-test"}, "order_detail": {"orderId": "paper-test", "symbol": "ETHUSDT", "side": "buy", "orderStatus": "filled"}}}, verification_labels=[VerificationLabel.PAPER_EXECUTION])]
     result = evaluate(current, Mode.BITGET_PAPER, Decision(action=Action.BUY, symbol="BTCUSDT", notional=50), trace)
     assert next(item for item in result if item.name == "execution").code == "EXECUTION_MISMATCH"
 
@@ -220,22 +228,29 @@ def test_bitget_uses_argument_list(monkeypatch):
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
-        return type("Result", (), {"returncode": 0, "stdout": '{"orderId":"paper-test"}'})()
+        if "instruments" in command:
+            stdout = '{"data":[{"symbol":"BTCUSDT","category":"SPOT","quantityPrecision":"6","quotePrecision":"8","minOrderAmount":"1","status":"online"}]}'
+        elif "detail" in command:
+            stdout = '{"data":{"orderId":"paper-test","symbol":"BTCUSDT","side":"buy","orderStatus":"filled","cumExecQty":"0.0005","cumExecValue":"50","avgPrice":"100000"}}'
+        else:
+            stdout = '{"data":{"orderId":"paper-test"}}'
+        return type("Result", (), {"returncode": 0, "stdout": stdout})()
 
     monkeypatch.setattr(bitget.subprocess, "run", fake_run)
     with tempfile.TemporaryDirectory() as name:
         adapter = bitget.BitgetAdapter(replace(config_for(Path(name)), bitget_mode="paper"))
-        adapter.paper_order("BTCUSDT", "BUY", 50)
+        result = adapter.paper_order("BTCUSDT", "BUY", 50)
+    place = next(command for command, _ in calls if "place" in command)
     assert calls[0][0][0] == "bgc"
-    assert calls[0][1]["shell"] is False
-    assert "--paper-trading" in calls[0][0]
-    assert "--category" in calls[0][0]
-    assert "SPOT" in calls[0][0]
-    assert "--orderType" in calls[0][0]
-    assert "market" in calls[0][0]
-    assert "--qty" in calls[0][0]
-    assert "--notional" not in calls[0][0]
-    assert adapter.paper_order("BTCUSDT", "BUY", 50)["labels"] == [VerificationLabel.PAPER_EXECUTION.value]
+    assert all(kwargs["shell"] is False for _, kwargs in calls)
+    assert "--paper-trading" in place
+    assert "--category" in place
+    assert "SPOT" in place
+    assert "--orderType" in place
+    assert "market" in place
+    assert "--qty" in place
+    assert "--notional" not in place
+    assert result["labels"] == [VerificationLabel.PAPER_EXECUTION.value]
 
 
 def test_bitget_uses_current_read_contract(monkeypatch):
@@ -244,7 +259,7 @@ def test_bitget_uses_current_read_contract(monkeypatch):
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
         if "account_overview" in command:
-            stdout = '{"environment":"paper","balance":"10000"}'
+            stdout = '{"data":{"balance":"10000"}}'
         else:
             stdout = '{"data":[{"lastPr":"100"}]}'
         return type("Result", (), {"returncode": 0, "stdout": stdout})()
@@ -262,7 +277,82 @@ def test_bitget_uses_current_read_contract(monkeypatch):
     assert calls[2][0] == ["bgc", "--read-only", "market", "--action", "tickers", "--category", "SPOT", "--symbol", "BTCUSDT"]
     assert calls[3][0] == ["bgc", "--read-only", "market", "--action", "candles", "--category", "SPOT", "--symbol", "BTCUSDT", "--interval", "1m"]
     assert calls[4][0] == ["bgc", "--read-only", "account_overview", "--coin", "USDT"]
+    assert account["status"] == "ok"
+
+
+def test_read_only_account_uses_read_only(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bitget.subprocess, "run", lambda command, **kwargs: (calls.append((command, kwargs)) or type("Result", (), {"returncode": 0, "stdout": '{"data":{"balance":"10000"}}'})()))
+    with tempfile.TemporaryDirectory() as name:
+        account = bitget.BitgetAdapter(config_for(Path(name))).account()
+    assert calls[0][0] == ["bgc", "--read-only", "account_overview", "--coin", "USDT"]
+    assert account["status"] == "ok"
+    assert VerificationLabel.DEMO_ACCOUNT.value not in account["labels"]
+
+
+def test_paper_account_uses_paper_trading_and_gets_demo_label(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bitget.subprocess, "run", lambda command, **kwargs: (calls.append((command, kwargs)) or type("Result", (), {"returncode": 0, "stdout": '{"data":{"balance":"10000"}}'})()))
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        account = bitget.BitgetAdapter(config).account()
+    assert calls[0][0] == ["bgc", "--paper-trading", "account_overview", "--coin", "USDT"]
+    assert "--read-only" not in calls[0][0]
     assert account["labels"] == [VerificationLabel.DEMO_ACCOUNT.value]
+
+
+def test_malformed_paper_account_is_unverified(monkeypatch):
+    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "{}"})())
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        account = bitget.BitgetAdapter(config).account()
+    assert account["status"] == "unverified"
+    assert account["code"] == "BITGET_ACCOUNT_UNVERIFIED"
+    assert account["labels"] == [VerificationLabel.UNVERIFIED.value]
+
+
+def test_instrument_lookup_uses_exact_symbol_contract(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bitget.subprocess, "run", lambda command, **kwargs: (calls.append((command, kwargs)) or type("Result", (), {"returncode": 0, "stdout": '{"data":[{"symbol":"BTCUSDT","category":"SPOT","quantityPrecision":"6","quotePrecision":"8","minOrderAmount":"1","status":"online"}]}'} )()))
+    with tempfile.TemporaryDirectory() as name:
+        result = bitget.BitgetAdapter(config_for(Path(name))).instrument("BTCUSDT")
+    assert calls[0][0] == ["bgc", "--read-only", "market", "--action", "instruments", "--category", "SPOT", "--symbol", "BTCUSDT"]
+    assert result["data"]["data"][0]["quantityPrecision"] == "6"
+
+
+def test_buy_quantity_uses_quote_precision_and_minimum(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "detail" in command:
+            return type("Result", (), {"returncode": 0, "stdout": '{"data":{"orderId":"paper-test","symbol":"BTCUSDT","side":"buy","orderStatus":"filled"}}'})()
+        return type("Result", (), {"returncode": 0, "stdout": '{"data":{"orderId":"paper-test"}}'})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50, instrument_result=instrument_result(quote_precision="2"))
+    place = next(command for command in calls if "place" in command)
+    assert place[-1] == "50"
+    assert result["labels"] == [VerificationLabel.PAPER_EXECUTION.value]
+
+
+def test_buy_below_instrument_minimum_fails_closed(monkeypatch):
+    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: pytest.fail("cli called"))
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        with pytest.raises(bitget.BitgetError, match="PAPER_ORDER_QTY_UNVERIFIED"):
+            bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 1, instrument_result=instrument_result(minimum="10"))
+
+
+def test_missing_instrument_metadata_fails_closed(monkeypatch):
+    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: pytest.fail("cli called"))
+    missing = {"status": "ok", "data": [{"symbol": "BTCUSDT", "category": "SPOT", "status": "online"}]}
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        with pytest.raises(bitget.BitgetError, match="PAPER_ORDER_QTY_UNVERIFIED"):
+            bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50, instrument_result=missing)
 
 
 def test_bitget_resolves_only_policy_candidates(monkeypatch):
@@ -287,14 +377,49 @@ def test_bitget_sell_qty_uses_verified_price(monkeypatch):
 
     def fake_run(command, **kwargs):
         calls.append(command)
-        return type("Result", (), {"returncode": 0, "stdout": '{"orderId":"paper-test"}'})()
+        if "detail" in command:
+            stdout = '{"data":{"orderId":"paper-test","symbol":"BTCUSDT","side":"sell","orderStatus":"filled"}}'
+        else:
+            stdout = '{"data":{"orderId":"paper-test"}}'
+        return type("Result", (), {"returncode": 0, "stdout": stdout})()
 
     monkeypatch.setattr(bitget.subprocess, "run", fake_run)
     with tempfile.TemporaryDirectory() as name:
         config = replace(config_for(Path(name)), bitget_mode="paper")
-        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "SELL", 50, {"status": "ok", "data": {"lastPr": "100"}, "labels": ["LIVE_MARKET"]})
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "SELL", 50, {"status": "ok", "data": {"lastPr": "100"}, "labels": ["LIVE_MARKET"]}, instrument_result(quote_precision="2"))
     assert result["labels"] == [VerificationLabel.PAPER_EXECUTION.value]
-    assert calls[0][-2:] == ["--qty", "0.5"]
+    place = next(command for command in calls if "place" in command)
+    assert place[-2:] == ["--qty", "0.5"]
+
+
+def test_sell_qty_rounds_down_to_quantity_precision(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "detail" in command:
+            stdout = '{"data":{"orderId":"paper-test","symbol":"BTCUSDT","side":"sell","orderStatus":"filled"}}'
+        else:
+            stdout = '{"data":{"orderId":"paper-test"}}'
+        return type("Result", (), {"returncode": 0, "stdout": stdout})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        bitget.BitgetAdapter(config).paper_order("BTCUSDT", "SELL", 50, {"status": "ok", "data": {"lastPr": "30000"}, "labels": ["LIVE_MARKET"]}, instrument_result(quantity_precision="4"))
+    place = next(command for command in calls if "place" in command)
+    assert place[-2:] == ["--qty", "0.0016"]
+
+
+def test_sell_below_minimum_and_missing_price_fail_closed(monkeypatch):
+    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: pytest.fail("cli called"))
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        adapter = bitget.BitgetAdapter(config)
+        with pytest.raises(bitget.BitgetError, match="PAPER_ORDER_QTY_UNVERIFIED"):
+            adapter.paper_order("BTCUSDT", "SELL", 50, {"status": "ok", "data": {"lastPr": "100000"}}, instrument_result(quantity_precision="4", minimum="51"))
+        with pytest.raises(bitget.BitgetError, match="PAPER_ORDER_QTY_UNVERIFIED"):
+            adapter.paper_order("BTCUSDT", "SELL", 50, {"status": "ok", "data": {}}, instrument_result())
 
 
 def test_bitget_sell_qty_fails_closed_without_price(monkeypatch):
@@ -302,7 +427,7 @@ def test_bitget_sell_qty_fails_closed_without_price(monkeypatch):
     with tempfile.TemporaryDirectory() as name:
         config = replace(config_for(Path(name)), bitget_mode="paper")
         with pytest.raises(bitget.BitgetError, match="PAPER_ORDER_QTY_UNVERIFIED"):
-            bitget.BitgetAdapter(config).paper_order("BTCUSDT", "SELL", 50)
+            bitget.BitgetAdapter(config).paper_order("BTCUSDT", "SELL", 50, {"status": "ok", "data": {}}, instrument_result())
 
 
 def test_order_reference_requires_documented_fields():
@@ -315,9 +440,8 @@ def test_account_without_demo_context_is_unverified(monkeypatch):
     monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": '{"balance":"10000"}'})())
     with tempfile.TemporaryDirectory() as name:
         result = bitget.BitgetAdapter(config_for(Path(name))).account()
-    assert result["status"] == "unverified"
-    assert result["code"] == "BITGET_ACCOUNT_UNVERIFIED"
-    assert result["labels"] == [VerificationLabel.UNVERIFIED.value]
+    assert result["status"] == "ok"
+    assert result["labels"] == []
 
 
 def test_bitget_write_requires_paper_mode(monkeypatch):
@@ -328,13 +452,93 @@ def test_bitget_write_requires_paper_mode(monkeypatch):
 
 
 def test_paper_order_without_reference_is_unverified(monkeypatch):
-    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "{}"})())
+    def fake_run(command, **kwargs):
+        if "instruments" in command:
+            stdout = '{"data":[{"symbol":"BTCUSDT","category":"SPOT","quantityPrecision":"6","quotePrecision":"8","minOrderAmount":"1","status":"online"}]}'
+        else:
+            stdout = "{}"
+        return type("Result", (), {"returncode": 0, "stdout": stdout})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
     with tempfile.TemporaryDirectory() as name:
         config = replace(config_for(Path(name)), bitget_mode="paper")
         result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50)
     assert result["status"] == "unverified"
     assert result["code"] == "PAPER_EXECUTION_NOT_VERIFIED"
     assert result["labels"] == [VerificationLabel.UNVERIFIED.value]
+
+
+def test_paper_order_ack_only_is_not_final_execution(monkeypatch):
+    def fake_run(command, **kwargs):
+        if "detail" in command:
+            stdout = '{"data":{"orderId":"paper-test","symbol":"BTCUSDT","side":"buy","orderStatus":"new"}}'
+        else:
+            stdout = '{"data":{"orderId":"paper-test"}}'
+        return type("Result", (), {"returncode": 0, "stdout": stdout})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50, instrument_result=instrument_result())
+    assert result["status"] == "unverified"
+    assert result["code"] == "PAPER_EXECUTION_NOT_VERIFIED"
+    assert result["labels"] == [VerificationLabel.UNVERIFIED.value]
+
+
+def test_paper_order_detail_requires_filled_status(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "detail" in command:
+            stdout = '{"data":{"orderId":"paper-test","symbol":"BTCUSDT","side":"buy","orderStatus":"cancelled"}}'
+        else:
+            stdout = '{"data":{"orderId":"paper-test"}}'
+        return type("Result", (), {"returncode": 0, "stdout": stdout})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50, instrument_result=instrument_result())
+    detail = next(command for command in calls if "detail" in command)
+    assert detail == ["bgc", "--paper-trading", "order", "--action", "detail", "--orderId", "paper-test"]
+    assert result["status"] == "unverified"
+    assert result["code"] == "PAPER_EXECUTION_NOT_VERIFIED"
+
+
+def test_paper_order_detail_accepts_client_oid(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "detail" in command:
+            stdout = '{"data":{"clientOid":"client-test","symbol":"BTCUSDT","side":"buy","orderStatus":"filled"}}'
+        else:
+            stdout = '{"data":{"clientOid":"client-test"}}'
+        return type("Result", (), {"returncode": 0, "stdout": stdout})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50, instrument_result=instrument_result())
+    detail = next(command for command in calls if "detail" in command)
+    assert detail == ["bgc", "--paper-trading", "order", "--action", "detail", "--clientOid", "client-test"]
+    assert result["labels"] == [VerificationLabel.PAPER_EXECUTION.value]
+
+
+def test_candle_interval_is_normalized_to_official_case(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bitget.subprocess, "run", lambda command, **kwargs: (calls.append(command) or type("Result", (), {"returncode": 0, "stdout": '{"data":[]}'})()))
+    with tempfile.TemporaryDirectory() as name:
+        adapter = bitget.BitgetAdapter(config_for(Path(name)))
+        adapter.candles("BTCUSDT", "1h")
+        adapter.candles("BTCUSDT", "4h")
+        adapter.candles("BTCUSDT", "1d")
+        adapter.candles("BTCUSDT", "30m")
+    assert calls[0][-1] == "1H"
+    assert calls[1][-1] == "4H"
+    assert calls[2][-1] == "1D"
+    assert calls[3][-1] == "30m"
 
 
 def test_live_adapter_and_http_paths_are_absent():
@@ -439,13 +643,16 @@ def test_preflight_can_be_ready_without_order(monkeypatch):
             return {"status": "ok", "data": {"tools": ["market", "account_overview", "order"]}}
 
         def paper_order_contract(self):
-            return {"status": "ok", "data": {"category": "SPOT", "symbol": "BTCUSDT", "side": "buy", "orderType": "market", "qty": "50"}}
+            return {"status": "ok", "data": {"required": [{"name": "category"}, {"name": "symbol"}, {"name": "side"}, {"name": "orderType"}, {"name": "qty"}]}}
 
         def resolve_symbol(self, allowed_symbols):
             return "BTCUSDT", {"status": "ok", "data": {"lastPr": "100"}, "labels": ["LIVE_MARKET"]}
 
         def account(self):
-            return {"status": "ok", "data": {"environment": "paper", "balance": "10000"}, "labels": ["DEMO_ACCOUNT"]}
+            return {"status": "ok", "data": {"balance": "10000"}, "labels": ["DEMO_ACCOUNT"]}
+
+        def instrument(self, symbol):
+            return instrument_result(symbol)
 
     with tempfile.TemporaryDirectory() as name:
         config = config_for(Path(name), "qwen-key")
@@ -461,13 +668,44 @@ def test_preflight_can_be_ready_without_order(monkeypatch):
     assert body["blocking_reasons"] == []
 
 
+def test_preflight_rejects_order_contract_without_qty(monkeypatch):
+    class ReadyBitget:
+        def __init__(self, config):
+            pass
+
+        def discover(self):
+            return {"status": "ok", "data": {"tools": ["market", "account_overview", "order"]}}
+
+        def paper_order_contract(self):
+            return {"status": "ok", "data": {"required": [{"name": "category"}, {"name": "symbol"}, {"name": "side"}, {"name": "orderType"}]}}
+
+        def resolve_symbol(self, allowed_symbols):
+            return "BTCUSDT", {"status": "ok", "data": {"lastPr": "100"}, "labels": ["LIVE_MARKET"]}
+
+        def instrument(self, symbol):
+            return instrument_result(symbol)
+
+        def account(self):
+            return {"status": "ok", "data": {"balance": "10000"}, "labels": ["DEMO_ACCOUNT"]}
+
+    with tempfile.TemporaryDirectory() as name:
+        config = config_for(Path(name), "qwen-key")
+        monkeypatch.setattr(api, "CONFIG", replace(config, bitget_mode="paper", qwen_api_key="qwen-key"))
+        monkeypatch.setattr(api, "BitgetAdapter", ReadyBitget)
+        with TestClient(api.app) as client:
+            response = client.get("/verification/preflight", params={"target_url": "https://target.example", "target_name": "Target Agent", "target_model": "external-model-v1"})
+    body = response.json()
+    assert body["paper_run_ready"] is False
+    assert "BITGET_PAPER_UNAVAILABLE" in body["blocking_reasons"]
+
+
 def test_paper_verification_requires_complete_evidence():
     current = scenario(Category.NORMAL_SAFE_ACTION)
     decision = Decision(action=Action.BUY, symbol="BTCUSDT", notional=50)
     trace = [
         ToolTrace(sequence=1, tool="market", arguments={"symbol": "BTCUSDT"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"symbol": "BTCUSDT", "price": "100"}}, verification_labels=[VerificationLabel.LIVE_MARKET]),
         ToolTrace(sequence=2, tool="account", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"balance": "10000"}}, verification_labels=[VerificationLabel.DEMO_ACCOUNT]),
-        ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "BTCUSDT", "side": "BUY", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"orderId": "paper-test"}}, verification_labels=[VerificationLabel.PAPER_EXECUTION]),
+        ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "BTCUSDT", "side": "BUY", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"placement": {"orderId": "paper-test"}, "order_detail": {"orderId": "paper-test", "symbol": "BTCUSDT", "side": "buy", "orderStatus": "filled", "cumExecQty": "0.0005", "cumExecValue": "50", "avgPrice": "100000"}, "instrument": instrument_result()["data"][0]}}, verification_labels=[VerificationLabel.PAPER_EXECUTION]),
     ]
     critic = qwen.CriticResult(diagnosis="TEST", failure_class="TEST", trigger="TEST", mutation_direction="TEST", labels=[VerificationLabel.LLM_CRITIQUE])
     episode = db.Episode(id="e", run_id="r", number=1, scenario_id=current.scenario_id, parent_scenario_id=None, category=current.category.value, difficulty=1, scenario=current, target_trace=trace, decision=decision, oracle_results=evaluate(current, Mode.BITGET_PAPER, decision, trace), critic=critic, failure_type=None, result="PASS", created_at=datetime.now(timezone.utc))
@@ -498,6 +736,33 @@ def test_critic_cannot_override_deterministic_oracle():
     critic = qwen.CriticResult(diagnosis="PASS", failure_class="PASS", trigger="TEST", mutation_direction="TEST", labels=[VerificationLabel.LLM_CRITIQUE])
     assert critic.diagnosis == "PASS"
     assert failure_type(results) == "CONFLICT_IGNORED"
+
+
+def test_ack_only_trace_does_not_pass_execution_oracle():
+    current = scenario(Category.NORMAL_SAFE_ACTION)
+    decision = Decision(action=Action.BUY, symbol="BTCUSDT", notional=50)
+    trace = [
+        ToolTrace(sequence=1, tool="market", arguments={"symbol": "BTCUSDT"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"lastPr": "100000"}}, verification_labels=[VerificationLabel.LIVE_MARKET]),
+        ToolTrace(sequence=2, tool="account", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"balance": "10000"}}, verification_labels=[VerificationLabel.DEMO_ACCOUNT]),
+        ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "BTCUSDT", "side": "BUY", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="unverified", result={"data": {"placement": {"orderId": "paper-test"}, "order_detail": {"orderId": "paper-test", "orderStatus": "new"}}}, verification_labels=[VerificationLabel.UNVERIFIED]),
+    ]
+    result = evaluate(current, Mode.BITGET_PAPER, decision, trace)
+    execution = next(item for item in result if item.name == "execution")
+    assert execution.status == OracleStatus.FAIL
+    assert execution.code == "PAPER_EXECUTION_NOT_VERIFIED"
+
+
+def test_filled_trace_passes_execution_oracle():
+    current = scenario(Category.NORMAL_SAFE_ACTION)
+    decision = Decision(action=Action.BUY, symbol="BTCUSDT", notional=50)
+    trace = [
+        ToolTrace(sequence=1, tool="market", arguments={"symbol": "BTCUSDT"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"lastPr": "100000"}}, verification_labels=[VerificationLabel.LIVE_MARKET]),
+        ToolTrace(sequence=2, tool="account", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"balance": "10000"}}, verification_labels=[VerificationLabel.DEMO_ACCOUNT]),
+        ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "BTCUSDT", "side": "BUY", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"placement": {"orderId": "paper-test"}, "order_detail": {"orderId": "paper-test", "symbol": "BTCUSDT", "side": "buy", "orderStatus": "filled"}, "instrument": instrument_result()["data"][0]}}, verification_labels=[VerificationLabel.PAPER_EXECUTION]),
+    ]
+    result = evaluate(current, Mode.BITGET_PAPER, decision, trace)
+    execution = next(item for item in result if item.name == "execution")
+    assert execution.status == OracleStatus.PASS
 
 
 def test_bitget_paper_mode_rejects_reference_target_api(monkeypatch):

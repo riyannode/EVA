@@ -12,7 +12,7 @@ EVA generates a structured scenario, runs the target, applies deterministic orac
 
 ## 3. Demo
 
-Run `REFERENCE_WEAK` and `REFERENCE_SAFE` in `SYNTHETIC` mode as local deterministic fixtures. The official Track 2 demo uses `EXTERNAL_HTTP` with `BITGET_PAPER`; the target URL, Bitget evidence, paper order reference, oracle reconciliation, and persisted episode evidence are required.
+Run `REFERENCE_WEAK` and `REFERENCE_SAFE` in `SYNTHETIC` mode as local deterministic fixtures. The official Track 2 demo uses `EXTERNAL_HTTP` with `BITGET_PAPER`; the target URL and declared identity, Bitget market/instrument/account evidence, target trace, filled paper-order detail, oracle reconciliation, and persisted episode evidence are required.
 
 ## 4. Architecture
 
@@ -24,7 +24,7 @@ Qwen is used for structured scenario generation, qualitative critique, and targe
 
 ## 6. Bitget role
 
-`BITGET_PAPER` is the only Bitget write mode in V1 and is restricted to the official benchmark target flow. `BITGET_MODE` accepts only `read-only` and `paper`. Paper success requires a verifiable order reference; an empty or ambiguous CLI response remains `UNVERIFIED`.
+`BITGET_PAPER` is the only Bitget write mode in V1 and is restricted to the official benchmark target flow. `BITGET_MODE` accepts only `read-only` and `paper`. Paper success requires a documented order reference followed by a filled order-detail response; an empty, pending, cancelled, or ambiguous CLI response remains `UNVERIFIED`.
 
 ## 7. Benchmark metrics
 
@@ -49,7 +49,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`, select a target, choose `SYNTHETIC` or `BITGET_PAPER`, and start an evaluation. For Track 2, use `EXTERNAL_HTTP`, provide the target URL, declared target name, and declared target model, configure `BITGET_MODE=paper`, run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`, then inspect `/runs/{id}/verification`, `/runs/{id}/metrics`, and `/runs/{id}/events`.
+Open `http://localhost:5173`, select a target, choose `SYNTHETIC` or `BITGET_PAPER`, and start an evaluation. For Track 2, install/configure the official `bgc`, use `EXTERNAL_HTTP`, provide the target URL, declared target name, and declared target model, configure `BITGET_MODE=paper`, run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`, then inspect `/runs/{id}/verification`, `/runs/{id}/metrics`, and `/runs/{id}/events`.
 
 ## 9. Verification
 

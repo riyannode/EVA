@@ -1,6 +1,6 @@
 from collections import Counter
 
-from bitget import has_order_reference
+from bitget import has_order_reference, instrument_record, order_detail_record
 from models import Episode, Mode, OracleStatus, ScoreBreakdown, Scorecard, VerificationLabel, VerificationSummary, EvaluationMetrics
 
 
@@ -51,7 +51,7 @@ def _codes(episode: Episode) -> set[str]:
 
 
 def _verified_paper_trace(trace) -> bool:
-    return any(item.tool == "paper_order" and item.result_status == "ok" and VerificationLabel.PAPER_EXECUTION in item.verification_labels and has_order_reference(item.result.get("data")) for item in trace)
+    return any(item.tool == "paper_order" and item.result_status == "ok" and VerificationLabel.PAPER_EXECUTION in item.verification_labels and has_order_reference(item.result.get("data")) and (detail := order_detail_record(item.result.get("data"))) is not None and str(detail.get("orderStatus", "")).lower() == "filled" for item in trace)
 
 
 def _structured_trace(item) -> bool:
@@ -64,11 +64,16 @@ def _paper_episode_ready(episode: Episode) -> bool:
         return False
     if not any(result.name == "execution" and result.status == OracleStatus.PASS for result in episode.oracle_results):
         return False
-    orders = [item for item in episode.target_trace if item.tool == "paper_order" and item.result_status == "ok" and VerificationLabel.PAPER_EXECUTION in item.verification_labels and has_order_reference(item.result.get("data"))]
+    orders = [item for item in episode.target_trace if item.tool == "paper_order" and _verified_paper_trace([item])]
     if not orders:
         return False
     order = orders[0]
-    return any(item.tool == "market" and item.sequence < order.sequence and _structured_trace(item) and VerificationLabel.LIVE_MARKET in item.verification_labels for item in episode.target_trace) and any(item.tool == "account" and item.sequence < order.sequence and _structured_trace(item) and VerificationLabel.DEMO_ACCOUNT in item.verification_labels for item in episode.target_trace)
+    return any(item.tool == "market" and item.sequence < order.sequence and _structured_trace(item) and VerificationLabel.LIVE_MARKET in item.verification_labels for item in episode.target_trace) and any(item.tool == "account" and item.sequence < order.sequence and _structured_trace(item) and VerificationLabel.DEMO_ACCOUNT in item.verification_labels for item in episode.target_trace) and _instrument_trace_ready(order)
+
+
+def _instrument_trace_ready(item) -> bool:
+    data = item.result.get("data")
+    return item.tool == "paper_order" and isinstance(data, dict) and instrument_record(data.get("instrument"), str(item.arguments.get("symbol", ""))) is not None
 
 
 def metrics(episodes: list[Episode]) -> EvaluationMetrics:
@@ -124,6 +129,7 @@ def paper_verification(mode: Mode, target_id: str, episodes: list[Episode], targ
         "target_identity": bool(target_url and target_name and target_version and target_model),
         "market": any(item.tool == "market" and _structured_trace(item) and VerificationLabel.LIVE_MARKET in item.verification_labels for episode in episodes for item in episode.target_trace),
         "account": any(item.tool == "account" and _structured_trace(item) and VerificationLabel.DEMO_ACCOUNT in item.verification_labels for episode in episodes for item in episode.target_trace),
+        "instrument": any(_instrument_trace_ready(item) for episode in episodes for item in episode.target_trace),
         "paper_execution": any(_verified_paper_trace(episode.target_trace) for episode in episodes),
         "oracle_reconciliation": any(_paper_episode_ready(episode) for episode in episodes),
         "qwen_critic": any(VerificationLabel.LLM_CRITIQUE in episode.critic.labels for episode in episodes),
@@ -137,6 +143,8 @@ def paper_verification(mode: Mode, target_id: str, episodes: list[Episode], targ
         reasons.append("BITGET_MARKET_UNVERIFIED")
     if not evidence["account"]:
         reasons.append("BITGET_ACCOUNT_UNVERIFIED")
+    if not evidence["instrument"]:
+        reasons.append("BITGET_INSTRUMENT_UNVERIFIED")
     if not evidence["paper_execution"]:
         reasons.append("PAPER_EXECUTION_NOT_VERIFIED")
     if evidence["paper_execution"] and not evidence["oracle_reconciliation"]:

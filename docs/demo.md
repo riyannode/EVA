@@ -28,7 +28,17 @@ Start a second run with `REFERENCE_SAFE` and the same settings. It refuses block
 
 ## Official Track 2 paper benchmark
 
-Configure `BITGET_MODE=paper`, select `EXTERNAL_HTTP`, provide the external target URL, declared target name, and declared target model, and run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`. Preflight reports environment/run readiness only and never submits an order. A complete Track 2 run needs market/account evidence, a safe target BUY/SELL decision, a `paper_order`, a verifiable `orderId` or `clientOid`, `PAPER_EXECUTION`, oracle reconciliation, persisted episode evidence, critic output, and metrics. Without `bgc`, paper credentials, or Qwen credentials, the relevant status remains `UNVERIFIED`.
+Install Node.js 20 or newer and the official CLI before configuring the benchmark:
+
+```powershell
+npm install -g @bitget-ai/bitget-agent-cli
+bgc --version
+bgc discover
+bgc discover --tool order --action place
+bgc discover --tool order --action detail
+```
+
+Configure `BITGET_MODE=paper`, select `EXTERNAL_HTTP`, provide the external target URL, declared target name, and declared target model, and run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`. Preflight reports environment/run readiness only and never submits an order. A complete Track 2 run needs market/instrument/account evidence, a safe target BUY/SELL decision, a `paper_order`, a documented `orderId` or `clientOid`, a filled `orderStatus` detail response, `PAPER_EXECUTION`, oracle reconciliation, persisted episode evidence, critic output, and metrics. Without `bgc`, paper credentials, or Qwen credentials, the relevant status remains `UNVERIFIED`.
 
 `REFERENCE_WEAK` and `REFERENCE_SAFE` remain local deterministic verification fixtures and do not qualify as the official Track 2 paper target.
 
@@ -44,6 +54,16 @@ $env:BITGET_MODE = 'paper'
 $env:BITGET_EXECUTABLE = 'bgc'
 ```
 
+Configure the official Bitget demo API credentials in the shell variables consumed by `bgc`:
+
+```powershell
+$env:BITGET_API_KEY = '<provided-demo-api-key>'
+$env:BITGET_SECRET_KEY = '<provided-demo-secret-key>'
+$env:BITGET_PASSPHRASE = '<provided-demo-passphrase>'
+bgc --version
+bgc discover
+```
+
 Run the backend, call preflight, then create the external-target paper run:
 
 ```powershell
@@ -57,7 +77,7 @@ Invoke-RestMethod "http://localhost:8000/runs/$($run.id)/metrics"
 Invoke-RestMethod "http://localhost:8000/runs/$($run.id)/score"
 ```
 
-Only the resulting persisted `PAPER_EXECUTION` order reference, target trace, oracle result, verification summary, and metrics can establish runtime evidence. Do not reuse this sequence for a missing or ambiguous paper result.
+Only the resulting persisted `PAPER_EXECUTION` order reference, order-detail evidence, target trace, oracle result, verification summary, and metrics can establish runtime evidence. Do not reuse this sequence for a missing, pending, cancelled, or ambiguous paper result.
 
 ## API smoke flow
 

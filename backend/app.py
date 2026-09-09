@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 import db
 import graph
-from bitget import BitgetAdapter, BitgetError, structured_result
+from bitget import BitgetAdapter, BitgetError, instrument_record, paper_order_contract_ready, structured_result
 from config import Config, load_config
 from models import EvaluationMetrics, Mode, Policy, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
 from score import metrics, paper_verification, score
@@ -70,17 +70,19 @@ def verification_preflight(target_url: str | None = None, target_name: str | Non
         reasons.append("TARGET_IDENTITY_REQUIRED")
     adapter = BitgetAdapter(CONFIG)
     discovery = adapter.discover()
-    cli_ready = discovery.get("status") == "ok"
+    cli_ready = discovery.get("status") == "ok" and structured_result(discovery)
     if discovery.get("code") == "BITGET_CLI_MISSING":
         reasons.append("BITGET_CLI_MISSING")
     elif not cli_ready:
         reasons.append("BITGET_PAPER_UNAVAILABLE")
     paper_contract = adapter.paper_order_contract() if cli_ready else None
-    paper_ready = CONFIG.bitget_mode == "paper" and paper_contract is not None and structured_result(paper_contract)
+    paper_ready = CONFIG.bitget_mode == "paper" and paper_order_contract_ready(paper_contract)
     if not paper_ready:
         reasons.append("BITGET_PAPER_UNAVAILABLE")
     symbol, market = adapter.resolve_symbol(Policy().allowed_symbols) if cli_ready else (None, None)
     market_ready = symbol is not None and market is not None and structured_result(market)
+    instrument = adapter.instrument(symbol) if market_ready and symbol else None
+    instrument_ready = bool(symbol and instrument and structured_result(instrument) and instrument_record(instrument, symbol))
     account_ready = False
     if cli_ready:
         try:
@@ -90,6 +92,8 @@ def verification_preflight(target_url: str | None = None, target_name: str | Non
             account_ready = False
     if not market_ready:
         reasons.append("BITGET_MARKET_UNVERIFIED")
+    if not instrument_ready:
+        reasons.append("BITGET_INSTRUMENT_UNVERIFIED")
     if not account_ready:
         reasons.append("BITGET_ACCOUNT_UNVERIFIED")
     if CONFIG.bitget_mode != "paper":
@@ -100,6 +104,7 @@ def verification_preflight(target_url: str | None = None, target_name: str | Non
         "qwen": qwen_status,
         "bitget_cli": "READY" if cli_ready else "UNVERIFIED",
         "bitget_market": "READY" if market_ready else "UNVERIFIED",
+        "bitget_instrument": "READY" if instrument_ready else "UNVERIFIED",
         "bitget_account": "READY" if account_ready else "UNVERIFIED",
         "bitget_paper": "READY" if paper_ready else "UNVERIFIED",
         "external_target": "READY" if external_ready else "UNVERIFIED",
