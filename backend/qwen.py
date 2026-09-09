@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from config import Config
+from prompts import CRITIC_PROMPT, CRITIC_TEMPLATE, MUTATION_PROMPT, MUTATION_TEMPLATE, PROMPT_VERSION, REPAIR_TEMPLATE, SCENARIO_PROMPT, SCENARIO_TEMPLATE, compact_weaknesses, json_data, render
 from models import Action, Category, CriticResult, Decision, Evidence, OracleResult, Portfolio, Policy, Scenario, ToolTrace, VerificationLabel
 
 try:
@@ -11,17 +12,11 @@ except ImportError:
     OpenAI = None
 
 
-PROMPT_VERSION = "v1"
-SCENARIO_PROMPT = "scenario"
-CRITIC_PROMPT = "critic"
-MUTATION_PROMPT = "mutation"
-
-
 class QwenUnavailable(RuntimeError):
     pass
 
 
-def _request_json(prompt: str, config: Config) -> dict[str, object]:
+def _request_json(prompt: list[dict[str, str]], config: Config) -> dict[str, object]:
     if not config.qwen_api_key or OpenAI is None:
         raise QwenUnavailable("QWEN_UNAVAILABLE")
     client = OpenAI(api_key=config.qwen_api_key, base_url=config.llm_base_url)
@@ -29,10 +24,19 @@ def _request_json(prompt: str, config: Config) -> dict[str, object]:
     raw = response.output_text
     if len(raw) > 200000:
         raise ValueError("QWEN_OUTPUT_LIMIT")
-    parsed = json.loads(raw)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        raise InvalidOutput(raw) from None
     if not isinstance(parsed, dict):
-        raise ValueError("QWEN_OBJECT_REQUIRED")
+        raise InvalidOutput(raw)
     return parsed
+
+
+class InvalidOutput(ValueError):
+    def __init__(self, output: str):
+        super().__init__("QWEN_JSON_INVALID")
+        self.output = output
 
 
 def _evidence(kind: str, summary: str, age_seconds: int, max_age_seconds: int, authoritative: bool = False) -> Evidence:
@@ -135,19 +139,21 @@ def _validate_scenario(data: dict[str, object], category: Category, difficulty: 
 
 
 def generate_scenario(category: Category, difficulty: int, weaknesses: list[dict[str, object]], config: Config, seed: int, parent_scenario_id: str | None = None, mutation_reason: str | None = None) -> Scenario:
-    prompt = json.dumps({"prompt_name": SCENARIO_PROMPT, "prompt_version": PROMPT_VERSION, "category": category.value, "difficulty": difficulty, "weaknesses": weaknesses, "output": "Scenario JSON only; do not include a score or advice"}, separators=(",", ":"))
+    prompt = render(SCENARIO_TEMPLATE, category=json_data(category.value), difficulty=json_data(difficulty), weaknesses_json=json_data(compact_weaknesses(weaknesses)), seed=json_data(seed), parent_scenario_id=json_data(parent_scenario_id), mutation_reason=json_data(mutation_reason))
     if not config.qwen_api_key or OpenAI is None:
         return fallback_scenario(category, difficulty, seed, parent_scenario_id, mutation_reason)
+    data = None
     try:
-        scenario = _validate_scenario(_request_json(prompt, config), category, difficulty)
-    except Exception:
-        repair = json.dumps({"prompt_name": SCENARIO_PROMPT, "prompt_version": PROMPT_VERSION, "repair": "Return one valid Scenario object matching the requested category and difficulty", "category": category.value, "difficulty": difficulty}, separators=(",", ":"))
+        data = _request_json(prompt, config)
+        scenario = _validate_scenario(data, category, difficulty)
+    except Exception as error:
+        repair = render(REPAIR_TEMPLATE, category=json_data(category.value), difficulty=json_data(difficulty), validation_error=json_data(type(error).__name__), invalid_output=json_data(error.output if isinstance(error, InvalidOutput) else data))
         try:
             scenario = _validate_scenario(_request_json(repair, config), category, difficulty)
         except Exception:
             return fallback_scenario(category, difficulty, seed, parent_scenario_id, "SCENARIO_GENERATION_FAILED")
     labels = [VerificationLabel.SYNTHETIC_MUTATION if parent_scenario_id else VerificationLabel.SYNTHETIC_SCENARIO]
-    return scenario.model_copy(update={"source_labels": labels, "parent_scenario_id": parent_scenario_id, "mutation_reason": mutation_reason, "prompt_name": SCENARIO_PROMPT, "prompt_version": PROMPT_VERSION, "model": config.model, "seed": seed})
+    return scenario.model_copy(update={"scenario_id": f"scenario-{seed}", "source_labels": labels, "parent_scenario_id": parent_scenario_id, "mutation_reason": mutation_reason, "prompt_name": SCENARIO_PROMPT, "prompt_version": PROMPT_VERSION, "model": config.model, "seed": seed})
 
 
 def critic(scenario: Scenario, trace: list[ToolTrace], decision: Decision | None, results: list[OracleResult], config: Config) -> CriticResult:
@@ -156,10 +162,10 @@ def critic(scenario: Scenario, trace: list[ToolTrace], decision: Decision | None
     fallback = CriticResult(diagnosis=failure, failure_class=failure, trigger=trigger, mutation_direction=scenario.category.value, model="unavailable", prompt_name=CRITIC_PROMPT, prompt_version=PROMPT_VERSION, labels=[VerificationLabel.UNVERIFIED])
     if not config.qwen_api_key or OpenAI is None:
         return fallback
-    prompt = json.dumps({"prompt_name": CRITIC_PROMPT, "prompt_version": PROMPT_VERSION, "scenario": scenario.model_dump(mode="json"), "target_trace": [item.model_dump(mode="json") for item in trace], "decision": decision.model_dump(mode="json") if decision else None, "oracle_results": [item.model_dump(mode="json") for item in results], "rule": "Oracle results are authoritative; diagnose only"}, separators=(",", ":"))
+    prompt = render(CRITIC_TEMPLATE, scenario_json=json_data(scenario.model_dump(mode="json")), target_trace_json=json_data([item.model_dump(mode="json") for item in trace]), decision_json=json_data(decision.model_dump(mode="json") if decision else None), oracle_results_json=json_data([item.model_dump(mode="json") for item in results]), primary_failure_code=json_data(failure))
     try:
         value = CriticResult.model_validate(_request_json(prompt, config))
-        return value.model_copy(update={"model": config.model, "prompt_name": CRITIC_PROMPT, "prompt_version": PROMPT_VERSION, "labels": [VerificationLabel.LLM_CRITIQUE]})
+        return value.model_copy(update={"failure_class": failure, "model": config.model, "prompt_name": CRITIC_PROMPT, "prompt_version": PROMPT_VERSION, "labels": [VerificationLabel.LLM_CRITIQUE]})
     except Exception:
         return fallback
 
@@ -177,13 +183,13 @@ def _fallback_mutation(parent: Scenario, failure: str, seed: int) -> Scenario:
     return parent.model_copy(update=updates)
 
 
-def mutate_scenario(parent: Scenario, failure: str, config: Config, seed: int) -> Scenario:
+def mutate_scenario(parent: Scenario, failure: str, config: Config, seed: int, weaknesses: list[dict[str, object]] | None = None) -> Scenario:
     if not config.qwen_api_key or OpenAI is None:
         return _fallback_mutation(parent, failure, seed)
-    prompt = json.dumps({"prompt_name": MUTATION_PROMPT, "prompt_version": PROMPT_VERSION, "parent": parent.model_dump(mode="json"), "failure_type": failure, "rule": "Change only enough fields to test this weakness and return Scenario JSON"}, separators=(",", ":"))
+    prompt = render(MUTATION_TEMPLATE, parent_scenario_json=json_data(parent.model_dump(mode="json")), failure_type=json_data(failure), weaknesses_json=json_data(compact_weaknesses(weaknesses or [])), current_difficulty=json_data(parent.difficulty), seed=json_data(seed))
     try:
         value = Scenario.model_validate(_request_json(prompt, config))
-        if value.category != parent.category or value.difficulty < parent.difficulty or value.difficulty > 5:
+        if value.category != parent.category or value.difficulty != parent.difficulty:
             raise ValueError("MUTATION_SEMANTIC_INVALID")
         return value.model_copy(update={"scenario_id": f"scenario-{seed}", "parent_scenario_id": parent.scenario_id, "mutation_reason": failure, "prompt_name": MUTATION_PROMPT, "prompt_version": PROMPT_VERSION, "model": config.model, "seed": seed, "source_labels": [VerificationLabel.SYNTHETIC_MUTATION]})
     except Exception:

@@ -213,7 +213,7 @@ def route_node(state: RunState) -> RunState:
 def mutate_node(state: RunState) -> RunState:
     parent = _scenario(state)
     next_episode = state.get("episode", 0) + 1
-    scenario = qwen.mutate_scenario(parent, state.get("failure_type") or "WEAKNESS", runtime_config(), next_episode)
+    scenario = qwen.mutate_scenario(parent, state.get("failure_type") or "WEAKNESS", runtime_config(), next_episode, state.get("weaknesses", []))
     state.update({"episode": next_episode, "scenario": scenario.model_dump(mode="json"), "mutation_attempts": state.get("mutation_attempts", 0) + 1, "target_trace": [], "target_decision": None, "oracle_results": [], "critic_result": {}, "failure_type": None, "target_error": None, "consistency_decisions": [], "scenario_history": [*state.get("scenario_history", []), scenario.scenario_id]})
     db.update_run(db_path(state), state["run_id"], episode=next_episode, category=scenario.category.value, stage="MUTATE", difficulty=scenario.difficulty)
     db.add_event(db_path(state), state["run_id"], "SCENARIO_MUTATED", {"scenario_id": scenario.scenario_id, "parent_scenario_id": scenario.parent_scenario_id, "mutation_reason": scenario.mutation_reason, "difficulty": scenario.difficulty})
