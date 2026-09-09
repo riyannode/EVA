@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+import time
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Sequence
 
@@ -18,6 +19,9 @@ _PRICE_KEYS = {"lastPr", "lastPrice", "price", "last"}
 _PAPER_ORDER_PARAMS = {"category", "symbol", "side", "orderType", "qty"}
 _INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1H", "4H", "6H", "12H", "1D"}
 _INTERVAL_ALIASES = {"1h": "1H", "4h": "4H", "1d": "1D"}
+MAX_ORDER_DETAIL_ATTEMPTS = 3
+ORDER_DETAIL_POLL_SECONDS = 0.2
+_PENDING_ORDER_STATUSES = {"live", "new", "partially_filled"}
 
 
 def has_order_reference(value: object) -> bool:
@@ -106,14 +110,16 @@ def order_detail_record(value: object) -> dict[str, object] | None:
 def paper_order_contract_ready(value: dict[str, object] | None) -> bool:
     if not value or not structured_result(value):
         return False
-    data = value.get("data")
-    if not isinstance(data, dict):
+    envelope = value.get("data")
+    if not isinstance(envelope, dict):
+        return False
+    data = envelope.get("data")
+    if not isinstance(data, dict) or data.get("tool") != "order" or data.get("action") != "place":
         return False
     required = data.get("required")
-    if isinstance(required, list):
-        names = {item.get("name") for item in required if isinstance(item, dict)}
-    else:
-        names = set(data)
+    if not isinstance(required, list):
+        return False
+    names = {item.get("name") for item in required if isinstance(item, dict)}
     return _PAPER_ORDER_PARAMS <= names
 
 
@@ -271,9 +277,20 @@ class BitgetAdapter:
             placement["code"] = "PAPER_EXECUTION_NOT_VERIFIED"
             placement["labels"] = [VerificationLabel.UNVERIFIED.value]
             return placement
-        detail = self.paper_order_detail(reference_key, reference)
-        data = {"placement": placement.get("data"), "order_detail": detail.get("data"), "instrument": instrument}
-        order = order_detail_record(detail.get("data")) if detail.get("status") == "ok" and structured_result(detail) else None
-        if not order or str(order.get("orderStatus", "")).lower() != "filled" or not has_order_reference(order) or order.get(reference_key) != reference:
-            return {"status": "unverified", "code": "PAPER_EXECUTION_NOT_VERIFIED", "data": data, "labels": [VerificationLabel.UNVERIFIED.value]}
-        return {"status": "ok", "data": data, "labels": [VerificationLabel.PAPER_EXECUTION.value]}
+        data = {"placement": placement.get("data"), "order_detail": None, "instrument": instrument}
+        for attempt in range(MAX_ORDER_DETAIL_ATTEMPTS):
+            detail = self.paper_order_detail(reference_key, reference)
+            data["order_detail"] = detail.get("data")
+            order = order_detail_record(detail.get("data")) if detail.get("status") == "ok" and structured_result(detail) else None
+            if not order:
+                break
+            status = str(order.get("orderStatus", "")).lower()
+            if status == "filled":
+                if has_order_reference(order) and order.get(reference_key) == reference:
+                    return {"status": "ok", "data": data, "labels": [VerificationLabel.PAPER_EXECUTION.value]}
+                break
+            if status not in _PENDING_ORDER_STATUSES:
+                break
+            if attempt + 1 < MAX_ORDER_DETAIL_ATTEMPTS:
+                time.sleep(ORDER_DETAIL_POLL_SECONDS)
+        return {"status": "unverified", "code": "PAPER_EXECUTION_NOT_VERIFIED", "data": data, "labels": [VerificationLabel.UNVERIFIED.value]}

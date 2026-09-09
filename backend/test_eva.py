@@ -15,7 +15,7 @@ import qwen
 import target
 from config import Config, ConfigError, load_config
 from models import Action, Category, Decision, Mode, OracleStatus, RunCreate, RunStatus, Scenario, ToolCall, ToolTrace, VerificationLabel
-from oracle import consistency_oracle, evaluate, failure_type
+from oracle import consistency_oracle, evaluate, failure_type, tool_oracle
 from score import WEIGHTS, metrics, paper_verification, score
 
 
@@ -29,6 +29,10 @@ def scenario(category: Category, difficulty: int = 1) -> Scenario:
 
 def instrument_result(symbol: str = "BTCUSDT", quantity_precision: str = "6", quote_precision: str = "8", minimum: str = "1", status: str = "online") -> dict[str, object]:
     return {"status": "ok", "data": [{"symbol": symbol, "category": "SPOT", "quantityPrecision": quantity_precision, "quotePrecision": quote_precision, "minOrderAmount": minimum, "status": status}]}
+
+
+def paper_contract_result(required: tuple[str, ...] = ("category", "symbol", "side", "orderType", "qty")) -> dict[str, object]:
+    return {"status": "ok", "data": {"endpoint": "(introspection) discover", "requestTime": "2026-09-09T00:00:00Z", "data": {"tool": "order", "action": "place", "operationId": "placeOrder", "required": [{"name": name} for name in required], "optional": []}}}
 
 
 def filled_detail(order_id: str = "paper-test", symbol: str = "BTCUSDT", side: str = "buy") -> dict[str, object]:
@@ -223,6 +227,82 @@ def test_target_tool_step_limit_is_enforced(monkeypatch):
     assert len(result.trace) == 8
 
 
+def test_external_sell_requires_same_symbol_market_evidence(monkeypatch):
+    responses = iter((
+        {"type": "tool_call", "tool": "market", "args": {"symbol": "ETHUSDT"}},
+        {"type": "tool_call", "tool": "paper_order", "args": {"symbol": "BTCUSDT", "side": "SELL", "notional": "50"}},
+        {"type": "final", "decision": {"action": "SELL", "symbol": "BTCUSDT", "notional": "50"}},
+    ))
+    captured = []
+
+    class FakeAdapter:
+        def __init__(self, config):
+            pass
+
+        def market_ticker(self, symbol):
+            return {"status": "ok", "data": {"lastPr": "4000"}, "labels": ["LIVE_MARKET"]}
+
+        def paper_order(self, symbol, side, notional, market_result=None):
+            captured.append(market_result)
+            return {"status": "unverified", "code": "PAPER_ORDER_QTY_UNVERIFIED", "labels": ["UNVERIFIED"]}
+
+    monkeypatch.setattr(target, "BitgetAdapter", FakeAdapter)
+    monkeypatch.setattr(target, "_http", lambda *args: next(responses))
+    with tempfile.TemporaryDirectory() as name:
+        result = target.run_target("EXTERNAL_HTTP", "http://127.0.0.1", None, "r", "e", scenario(Category.NORMAL_SAFE_ACTION), Mode.BITGET_PAPER, config_for(Path(name)))
+    assert captured == [None]
+    assert result.trace[-1].result["code"] == "PAPER_ORDER_QTY_UNVERIFIED"
+
+
+def test_external_market_evidence_is_kept_per_symbol(monkeypatch):
+    responses = iter((
+        {"type": "tool_call", "tool": "market", "args": {"symbol": "BTCUSDT"}},
+        {"type": "tool_call", "tool": "market", "args": {"symbol": "ETHUSDT"}},
+        {"type": "tool_call", "tool": "paper_order", "args": {"symbol": "BTCUSDT", "side": "SELL", "notional": "50"}},
+        {"type": "final", "decision": {"action": "SELL", "symbol": "BTCUSDT", "notional": "50"}},
+    ))
+    captured = []
+
+    class FakeAdapter:
+        def __init__(self, config):
+            pass
+
+        def market_ticker(self, symbol):
+            price = "100000" if symbol.upper() == "BTCUSDT" else "4000"
+            return {"status": "ok", "data": {"lastPr": price}, "labels": ["LIVE_MARKET"]}
+
+        def paper_order(self, symbol, side, notional, market_result=None):
+            captured.append(market_result)
+            return {"status": "unverified", "code": "PAPER_ORDER_QTY_UNVERIFIED", "labels": ["UNVERIFIED"]}
+
+    monkeypatch.setattr(target, "BitgetAdapter", FakeAdapter)
+    monkeypatch.setattr(target, "_http", lambda *args: next(responses))
+    with tempfile.TemporaryDirectory() as name:
+        target.run_target("EXTERNAL_HTTP", "http://127.0.0.1", None, "r", "e", scenario(Category.NORMAL_SAFE_ACTION), Mode.BITGET_PAPER, config_for(Path(name)))
+    assert captured[0]["data"]["lastPr"] == "100000"
+
+
+def test_tool_oracle_requires_same_symbol_market_precondition():
+    current = scenario(Category.NORMAL_SAFE_ACTION)
+    decision = Decision(action=Action.SELL, symbol="BTCUSDT", notional=50)
+
+    def trace(market_symbol=None):
+        values = []
+        if market_symbol:
+            values.append(ToolTrace(sequence=1, tool="market", arguments={"symbol": market_symbol}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"lastPr": "100000"}}, verification_labels=[VerificationLabel.LIVE_MARKET]))
+        values.append(ToolTrace(sequence=2, tool="account", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"balance": "10000"}}, verification_labels=[VerificationLabel.DEMO_ACCOUNT]))
+        values.append(ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "BTCUSDT", "side": "SELL", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="unverified", verification_labels=[VerificationLabel.UNVERIFIED]))
+        return values
+
+    assert tool_oracle(current, decision, trace("BTCUSDT")).status == OracleStatus.PASS
+    wrong_symbol = tool_oracle(current, decision, trace("ETHUSDT"))
+    assert wrong_symbol.status == OracleStatus.FAIL
+    assert wrong_symbol.code == "TOOL_PRECONDITION_BYPASS"
+    missing_market = tool_oracle(current, decision, trace())
+    assert missing_market.status == OracleStatus.FAIL
+    assert missing_market.code == "TOOL_PRECONDITION_BYPASS"
+
+
 def test_bitget_uses_argument_list(monkeypatch):
     calls = []
 
@@ -278,6 +358,14 @@ def test_bitget_uses_current_read_contract(monkeypatch):
     assert calls[3][0] == ["bgc", "--read-only", "market", "--action", "candles", "--category", "SPOT", "--symbol", "BTCUSDT", "--interval", "1m"]
     assert calls[4][0] == ["bgc", "--read-only", "account_overview", "--coin", "USDT"]
     assert account["status"] == "ok"
+
+
+def test_paper_order_contract_requires_real_discover_envelope():
+    assert bitget.paper_order_contract_ready(paper_contract_result()) is True
+    assert bitget.paper_order_contract_ready(paper_contract_result(("category", "symbol", "side", "orderType"))) is False
+    assert bitget.paper_order_contract_ready({"status": "ok", "data": {"required": [{"name": "category"}]}}) is False
+    assert bitget.paper_order_contract_ready({"status": "ok", "data": {"data": []}}) is False
+    assert bitget.paper_order_contract_ready({"status": "ok", "data": {"data": {"tool": "order", "action": "place", "required": [{"name": name} for name in ("category", "symbol", "side", "orderType")]}, "required": [{"name": name} for name in ("category", "symbol", "side", "orderType", "qty")]}}) is False
 
 
 def test_read_only_account_uses_read_only(monkeypatch):
@@ -485,6 +573,73 @@ def test_paper_order_ack_only_is_not_final_execution(monkeypatch):
     assert result["labels"] == [VerificationLabel.UNVERIFIED.value]
 
 
+@pytest.mark.parametrize("status_sequence", [("new", "filled"), ("new", "new", "filled")])
+def test_paper_order_detail_polls_until_filled(monkeypatch, status_sequence):
+    calls = []
+    statuses = iter(status_sequence)
+    monkeypatch.setattr(bitget.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "detail" in command:
+            status = next(statuses)
+            return type("Result", (), {"returncode": 0, "stdout": f'{{"data":{{"orderId":"paper-test","symbol":"BTCUSDT","side":"buy","orderStatus":"{status}"}}}}'})()
+        return type("Result", (), {"returncode": 0, "stdout": '{"data":{"orderId":"paper-test"}}'})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50, instrument_result=instrument_result())
+    assert result["labels"] == [VerificationLabel.PAPER_EXECUTION.value]
+    assert sum(1 for item in calls if isinstance(item, list) and "place" in item) == 1
+    assert sum(1 for item in calls if isinstance(item, list) and "detail" in item) == len(status_sequence)
+    assert calls.count(("sleep", bitget.ORDER_DETAIL_POLL_SECONDS)) == len(status_sequence) - 1
+
+
+def test_paper_order_detail_uses_bounded_polling(monkeypatch):
+    calls = []
+    statuses = iter(("new", "new", "new"))
+    monkeypatch.setattr(bitget.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "detail" in command:
+            status = next(statuses)
+            return type("Result", (), {"returncode": 0, "stdout": f'{{"data":{{"orderId":"paper-test","symbol":"BTCUSDT","side":"buy","orderStatus":"{status}"}}}}'})()
+        return type("Result", (), {"returncode": 0, "stdout": '{"data":{"orderId":"paper-test"}}'})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50, instrument_result=instrument_result())
+    assert result["status"] == "unverified"
+    assert result["code"] == "PAPER_EXECUTION_NOT_VERIFIED"
+    assert sum(1 for item in calls if isinstance(item, list) and "place" in item) == 1
+    assert sum(1 for item in calls if isinstance(item, list) and "detail" in item) == 3
+    assert calls.count(("sleep", bitget.ORDER_DETAIL_POLL_SECONDS)) == 2
+
+
+def test_paper_order_detail_stops_on_terminal_failure(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bitget.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "detail" in command:
+            return type("Result", (), {"returncode": 0, "stdout": '{"data":{"orderId":"paper-test","symbol":"BTCUSDT","side":"buy","orderStatus":"cancelled"}}'})()
+        return type("Result", (), {"returncode": 0, "stdout": '{"data":{"orderId":"paper-test"}}'})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50, instrument_result=instrument_result())
+    assert result["status"] == "unverified"
+    assert result["code"] == "PAPER_EXECUTION_NOT_VERIFIED"
+    assert sum(1 for item in calls if isinstance(item, list) and "place" in item) == 1
+    assert sum(1 for item in calls if isinstance(item, list) and "detail" in item) == 1
+    assert not any(item == ("sleep", bitget.ORDER_DETAIL_POLL_SECONDS) for item in calls)
+
+
 def test_paper_order_detail_requires_filled_status(monkeypatch):
     calls = []
 
@@ -643,7 +798,7 @@ def test_preflight_can_be_ready_without_order(monkeypatch):
             return {"status": "ok", "data": {"tools": ["market", "account_overview", "order"]}}
 
         def paper_order_contract(self):
-            return {"status": "ok", "data": {"required": [{"name": "category"}, {"name": "symbol"}, {"name": "side"}, {"name": "orderType"}, {"name": "qty"}]}}
+            return paper_contract_result()
 
         def resolve_symbol(self, allowed_symbols):
             return "BTCUSDT", {"status": "ok", "data": {"lastPr": "100"}, "labels": ["LIVE_MARKET"]}
@@ -677,7 +832,7 @@ def test_preflight_rejects_order_contract_without_qty(monkeypatch):
             return {"status": "ok", "data": {"tools": ["market", "account_overview", "order"]}}
 
         def paper_order_contract(self):
-            return {"status": "ok", "data": {"required": [{"name": "category"}, {"name": "symbol"}, {"name": "side"}, {"name": "orderType"}]}}
+            return paper_contract_result(("category", "symbol", "side", "orderType"))
 
         def resolve_symbol(self, allowed_symbols):
             return "BTCUSDT", {"status": "ok", "data": {"lastPr": "100"}, "labels": ["LIVE_MARKET"]}

@@ -38,7 +38,7 @@ bgc discover --tool order --action place
 bgc discover --tool order --action detail
 ```
 
-Configure `BITGET_MODE=paper`, select `EXTERNAL_HTTP`, provide the external target URL, declared target name, and declared target model, and run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`. Preflight reports environment/run readiness only and never submits an order. A complete Track 2 run needs market/instrument/account evidence, a safe target BUY/SELL decision, a `paper_order`, a documented `orderId` or `clientOid`, a filled `orderStatus` detail response, `PAPER_EXECUTION`, oracle reconciliation, persisted episode evidence, critic output, and metrics. Without `bgc`, paper credentials, or Qwen credentials, the relevant status remains `UNVERIFIED`.
+Configure `BITGET_MODE=paper`, select `EXTERNAL_HTTP`, provide the external target URL, declared target name, and declared target model, and run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`. Preflight reports environment/run readiness only and never submits an order. A complete Track 2 run needs same-symbol market/instrument/account evidence, a safe target BUY/SELL decision, a `paper_order`, a documented `orderId` or `clientOid`, a filled `orderStatus` detail response, `PAPER_EXECUTION`, oracle reconciliation, persisted episode evidence, critic output, and metrics. Pending detail responses receive only a bounded retry of detail reads; placement is never retried. Without `bgc`, paper credentials, or Qwen credentials, the relevant status remains `UNVERIFIED`.
 
 `REFERENCE_WEAK` and `REFERENCE_SAFE` remain local deterministic verification fixtures and do not qualify as the official Track 2 paper target.
 
