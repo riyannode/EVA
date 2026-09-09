@@ -28,8 +28,8 @@ Reference targets are deliberately small demo fixtures. They demonstrate how EVA
 
 ## Bitget
 
-`bitget.py` invokes a fixed executable with argument arrays and `shell=False`. It exposes discovery, market ticker, candles, account overview, paper order, and a separately gated live order. Live execution requires both `BITGET_MODE=live` and `ENABLE_LIVE_TRADING=true`; the evaluation graph never exposes that write capability to Qwen targets.
+`bitget.py` invokes a fixed executable with argument arrays and `shell=False`. It exposes discovery, market ticker, candles, account overview, and paper order. Paper execution is the only Bitget write path; an order is verified only when the CLI response contains an order reference. The evaluation graph exposes only standardized paper tools to external targets.
 
 ## Frontend
 
-The flat React dashboard calls the FastAPI endpoints, opens `/runs/{id}/events` through `EventSource`, and polls once per second as a fallback. It renders text as text and never inserts raw HTML. The live execution panel previews and submits only after explicit user confirmation.
+The flat React dashboard calls the FastAPI endpoints, opens `/runs/{id}/events` through `EventSource`, and polls once per second as a fallback. It renders text as text and never inserts raw HTML.

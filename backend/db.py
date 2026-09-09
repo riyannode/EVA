@@ -3,10 +3,9 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 
-from models import CriticResult, Decision, Episode, Event, LiveOrder, LiveOrderRequest, Mode, OracleResult, Run, RunCreate, RunStatus, Scenario, TargetListing, ToolTrace, Weakness
+from models import CriticResult, Decision, Episode, Event, Mode, OracleResult, Run, RunCreate, RunStatus, Scenario, TargetListing, ToolTrace, Weakness
 
 
 def now() -> datetime:
@@ -57,6 +56,7 @@ def init_db(path: Path) -> None:
                 id TEXT PRIMARY KEY,
                 target_id TEXT NOT NULL,
                 target_version TEXT NOT NULL,
+                target_url TEXT,
                 mode TEXT NOT NULL,
                 status TEXT NOT NULL,
                 difficulty INTEGER NOT NULL,
@@ -109,19 +109,12 @@ def init_db(path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS events_run_id_id ON events(run_id, id);
             CREATE INDEX IF NOT EXISTS episodes_run_id_number ON episodes(run_id, number);
-            CREATE TABLE IF NOT EXISTS live_orders (
-                id TEXT PRIMARY KEY,
-                idempotency_key TEXT NOT NULL UNIQUE,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                notional TEXT NOT NULL,
-                status TEXT NOT NULL,
-                result_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
             """
         )
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+        if "target_url" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN target_url TEXT")
+        connection.execute("DROP TABLE IF EXISTS live_orders")
 
 
 def create_run(path: Path, request: RunCreate) -> Run:
@@ -129,8 +122,8 @@ def create_run(path: Path, request: RunCreate) -> Run:
     created = now()
     with _session(path) as connection:
         connection.execute(
-            "INSERT INTO runs (id, target_id, target_version, mode, status, difficulty, max_episodes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (run_id, request.target_id, request.target_version, request.mode.value, RunStatus.CREATED.value, request.difficulty, request.max_episodes, created.isoformat()),
+            "INSERT INTO runs (id, target_id, target_version, target_url, mode, status, difficulty, max_episodes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, request.target_id, request.target_version, request.target_url, request.mode.value, RunStatus.CREATED.value, request.difficulty, request.max_episodes, created.isoformat()),
         )
     return get_run(path, run_id)
 
@@ -140,6 +133,7 @@ def _run(row: sqlite3.Row) -> Run:
         id=row["id"],
         target_id=row["target_id"],
         target_version=row["target_version"],
+        target_url=row["target_url"],
         mode=Mode(row["mode"]),
         status=RunStatus(row["status"]),
         difficulty=row["difficulty"],
@@ -253,55 +247,6 @@ def get_episodes(path: Path, run_id: str) -> list[Episode]:
     with _session(path) as connection:
         rows = connection.execute("SELECT * FROM episodes WHERE run_id = ? ORDER BY number", (run_id,)).fetchall()
     return [_episode(row) for row in rows]
-
-
-def _live_order(row: sqlite3.Row) -> LiveOrder:
-    return LiveOrder(
-        id=row["id"],
-        idempotency_key=row["idempotency_key"],
-        symbol=row["symbol"],
-        side=row["side"],
-        notional=Decimal(row["notional"]),
-        status=row["status"],
-        result=_payload(row["result_json"]),
-        created_at=datetime.fromisoformat(row["created_at"]),
-        updated_at=datetime.fromisoformat(row["updated_at"]),
-    )
-
-
-def get_live_order(path: Path, order_id: str) -> LiveOrder:
-    with _session(path) as connection:
-        row = connection.execute("SELECT * FROM live_orders WHERE id = ?", (order_id,)).fetchone()
-    if row is None:
-        raise KeyError("ORDER_NOT_FOUND")
-    return _live_order(row)
-
-
-def reserve_live_order(path: Path, request: LiveOrderRequest) -> tuple[LiveOrder, bool]:
-    order_id = str(uuid.uuid4())
-    created = now()
-    try:
-        with _session(path) as connection:
-            connection.execute(
-                "INSERT INTO live_orders (id, idempotency_key, symbol, side, notional, status, result_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (order_id, request.idempotency_key, request.symbol, request.side, str(request.notional), "SUBMITTING", "{}", created.isoformat(), created.isoformat()),
-            )
-    except sqlite3.IntegrityError:
-        with _session(path) as connection:
-            row = connection.execute("SELECT * FROM live_orders WHERE idempotency_key = ?", (request.idempotency_key,)).fetchone()
-        if row is None:
-            raise
-        if row["symbol"] != request.symbol or row["side"] != request.side or Decimal(row["notional"]) != request.notional:
-            raise ValueError("IDEMPOTENCY_CONFLICT")
-        return _live_order(row), False
-    return get_live_order(path, order_id), True
-
-
-def update_live_order(path: Path, order_id: str, status: str, result: dict[str, object]) -> LiveOrder:
-    updated = now()
-    with _session(path) as connection:
-        connection.execute("UPDATE live_orders SET status = ?, result_json = ?, updated_at = ? WHERE id = ?", (status, _text(result), updated.isoformat(), order_id))
-    return get_live_order(path, order_id)
 
 
 def get_weaknesses(path: Path, target_id: str | None = None, target_version: str | None = None) -> list[Weakness]:

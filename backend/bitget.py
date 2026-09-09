@@ -16,12 +16,33 @@ _SYMBOL = re.compile(r"^[A-Z0-9._-]{1,40}$")
 _ORDER_KEYS = {"id", "orderId", "order_id", "clientOid", "client_order_id"}
 
 
-def _has_order_reference(value: object) -> bool:
+def has_order_reference(value: object) -> bool:
     if isinstance(value, dict):
-        return any(key in value and value[key] for key in _ORDER_KEYS) or any(_has_order_reference(item) for item in value.values())
+        return any(key in value and value[key] for key in _ORDER_KEYS) or any(has_order_reference(item) for item in value.values())
     if isinstance(value, list):
-        return any(_has_order_reference(item) for item in value)
+        return any(has_order_reference(item) for item in value)
     return False
+
+
+def discovered_symbols(value: object) -> list[str]:
+    symbols: list[str] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            for key in {"symbol", "symbolName", "instId", "instrument"}:
+                candidate = item.get(key)
+                if isinstance(candidate, str):
+                    symbol = candidate.upper()
+                    if _SYMBOL.fullmatch(symbol) and symbol not in symbols:
+                        symbols.append(symbol)
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return symbols
 
 
 class BitgetAdapter:
@@ -74,23 +95,8 @@ class BitgetAdapter:
         if side not in {"BUY", "SELL"} or notional <= 0:
             raise BitgetError("INVALID_PAPER_ORDER")
         result = self._run(["--paper-trading", "order", "--action", "place", "--symbol", self._symbol(symbol), "--side", side, "--notional", format(notional, "f")])
+        if result.get("status") == "ok" and not has_order_reference(result.get("data")):
+            result["status"] = "unverified"
+            result["code"] = "PAPER_EXECUTION_NOT_VERIFIED"
         result["labels"] = [VerificationLabel.PAPER_EXECUTION.value] if result.get("status") == "ok" else [VerificationLabel.UNVERIFIED.value]
-        return result
-
-    def live_order(self, symbol: str, side: str, notional: Decimal) -> dict[str, object]:
-        if self.config.bitget_mode != "live":
-            return {"status": "error", "code": "LIVE_MODE_REQUIRED", "labels": [VerificationLabel.UNVERIFIED.value]}
-        if not self.config.live_trading_enabled:
-            return {"status": "error", "code": "LIVE_TRADING_DISABLED", "labels": [VerificationLabel.UNVERIFIED.value]}
-        if side not in {"BUY", "SELL"} or notional <= 0:
-            raise BitgetError("INVALID_LIVE_ORDER")
-        result = self._run(["order", "--action", "place", "--symbol", self._symbol(symbol), "--side", side, "--notional", format(notional, "f")])
-        if result.get("code") == "BITGET_TIMEOUT":
-            result["status"] = "unknown"
-            result["code"] = "LIVE_EXECUTION_UNKNOWN"
-        data = result.get("data")
-        if result.get("status") == "ok" and not _has_order_reference(data):
-            result["status"] = "unknown"
-            result["code"] = "LIVE_EXECUTION_UNVERIFIED"
-        result["labels"] = [VerificationLabel.LIVE_EXECUTION.value] if result.get("status") == "ok" else [VerificationLabel.UNVERIFIED.value]
         return result

@@ -1,4 +1,5 @@
 import tempfile
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ import target
 from config import Config, ConfigError, load_config
 from models import Action, Category, Decision, Mode, OracleStatus, RunCreate, RunStatus, Scenario, ToolCall, ToolTrace, VerificationLabel
 from oracle import consistency_oracle, evaluate, failure_type
-from score import WEIGHTS, score
+from score import WEIGHTS, metrics, paper_verification, score
 
 
 def config_for(path: Path, key: str | None = None) -> Config:
@@ -28,7 +29,9 @@ def scenario(category: Category, difficulty: int = 1) -> Scenario:
 
 def test_missing_qwen_key_is_allowed(monkeypatch):
     monkeypatch.delenv("BITGET_QWEN_API_KEY", raising=False)
+    monkeypatch.delenv("BITGET_MODE", raising=False)
     assert load_config().qwen_api_key is None
+    assert load_config().bitget_mode == "read-only"
 
 
 def test_invalid_mode_is_rejected(monkeypatch):
@@ -37,12 +40,14 @@ def test_invalid_mode_is_rejected(monkeypatch):
         load_config()
 
 
-def test_live_mode_is_valid_but_disabled_by_default(monkeypatch):
+def test_live_mode_is_rejected(monkeypatch):
     monkeypatch.setenv("BITGET_MODE", "live")
     monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
-    config = load_config()
-    assert config.bitget_mode == "live"
-    assert config.live_trading_enabled is False
+    with pytest.raises(ConfigError, match="INVALID_BITGET_MODE"):
+        load_config()
+    for mode in ("read-only", "paper"):
+        monkeypatch.setenv("BITGET_MODE", mode)
+        assert load_config().bitget_mode == mode
 
 
 def test_valid_scenario_is_accepted():
@@ -129,7 +134,7 @@ def test_duplicate_action_fails():
 
 def test_execution_mismatch_fails():
     current = scenario(Category.NORMAL_SAFE_ACTION)
-    trace = [ToolTrace(sequence=1, tool="market", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok"), ToolTrace(sequence=2, tool="account", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok"), ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "ETHUSDT", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="ok", verification_labels=[VerificationLabel.PAPER_EXECUTION])]
+    trace = [ToolTrace(sequence=1, tool="market", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok"), ToolTrace(sequence=2, tool="account", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok"), ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "ETHUSDT", "side": "BUY", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"orderId": "paper-test"}}, verification_labels=[VerificationLabel.PAPER_EXECUTION])]
     result = evaluate(current, Mode.BITGET_PAPER, Decision(action=Action.BUY, symbol="BTCUSDT", notional=50), trace)
     assert next(item for item in result if item.name == "execution").code == "EXECUTION_MISMATCH"
 
@@ -196,7 +201,7 @@ def test_bitget_uses_argument_list(monkeypatch):
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
-        return type("Result", (), {"returncode": 0, "stdout": "{}"})()
+        return type("Result", (), {"returncode": 0, "stdout": '{"orderId":"paper-test"}'})()
 
     monkeypatch.setattr(bitget.subprocess, "run", fake_run)
     with tempfile.TemporaryDirectory() as name:
@@ -215,60 +220,150 @@ def test_bitget_write_requires_paper_mode(monkeypatch):
     assert result["code"] == "PAPER_MODE_REQUIRED"
 
 
-def test_bitget_live_order_requires_explicit_enable(monkeypatch):
-    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: pytest.fail("cli called"))
+def test_paper_order_without_reference_is_unverified(monkeypatch):
+    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "{}"})())
     with tempfile.TemporaryDirectory() as name:
-        config = replace(config_for(Path(name)), bitget_mode="live", live_trading_enabled=False)
-        result = bitget.BitgetAdapter(config).live_order("BTCUSDT", "BUY", 50)
-    assert result["code"] == "LIVE_TRADING_DISABLED"
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "BUY", 50)
+    assert result["status"] == "unverified"
+    assert result["code"] == "PAPER_EXECUTION_NOT_VERIFIED"
+    assert result["labels"] == [VerificationLabel.UNVERIFIED.value]
 
 
-def test_bitget_live_order_omits_paper_flag(monkeypatch):
-    calls = []
+def test_live_adapter_and_http_paths_are_absent():
+    assert not hasattr(bitget.BitgetAdapter, "live_order")
+    paths = {route.path for route in api.app.routes}
+    assert "/trading/orders" not in paths
+    assert "/trading/orders/preview" not in paths
+    assert "/trading/status" not in paths
 
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        return type("Result", (), {"returncode": 0, "stdout": '{"orderId":"verified-by-test"}'})()
 
-    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+def test_live_order_table_is_not_created():
     with tempfile.TemporaryDirectory() as name:
-        config = replace(config_for(Path(name)), bitget_mode="live", live_trading_enabled=True)
-        result = bitget.BitgetAdapter(config).live_order("BTCUSDT", "BUY", 50)
-    assert result["labels"] == [VerificationLabel.LIVE_EXECUTION.value]
-    assert "--paper-trading" not in calls[0][0]
+        path = Path(name) / "eva.db"
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE TABLE live_orders (id TEXT)")
+        connection.commit()
+        connection.close()
+        db.init_db(path)
+        connection = sqlite3.connect(path)
+        try:
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        finally:
+            connection.close()
+    assert "live_orders" not in tables
 
 
-def test_live_order_api_requires_confirmation_and_is_idempotent(monkeypatch):
-    calls = []
+def test_benchmark_target_has_no_live_tool(monkeypatch):
+    payloads = []
 
-    class FakeAdapter:
+    def fake_http(url, payload, token, config):
+        payloads.append(payload)
+        return {"type": "final", "decision": {"action": "HOLD"}}
+
+    monkeypatch.setattr(target, "_http", fake_http)
+    with tempfile.TemporaryDirectory() as name:
+        result = target.run_target("EXTERNAL_HTTP", "https://target.example", None, "r", "e", scenario(Category.NORMAL_SAFE_ACTION), Mode.SYNTHETIC, config_for(Path(name)))
+    assert result.error is None
+    assert "live_order" not in payloads[0]["available_tools"]
+    assert target._tool_result("live_order", {}, scenario(Category.NORMAL_SAFE_ACTION), Mode.SYNTHETIC, bitget.BitgetAdapter(config_for(Path(name))))["code"] == "DISALLOWED_TOOL"
+
+
+def test_paper_mode_requires_external_target():
+    with pytest.raises(ValueError, match="BITGET_PAPER_EXTERNAL_TARGET_REQUIRED"):
+        RunCreate(target_id="REFERENCE_SAFE", mode=Mode.BITGET_PAPER)
+    with pytest.raises(ValueError, match="TARGET_URL_REQUIRED"):
+        RunCreate(target_id="EXTERNAL_HTTP", mode=Mode.BITGET_PAPER)
+
+
+def test_synthetic_targets_remain_available():
+    assert RunCreate(target_id="REFERENCE_SAFE").mode == Mode.SYNTHETIC
+    assert RunCreate(target_id="REFERENCE_WEAK").mode == Mode.SYNTHETIC
+    assert RunCreate(target_id="EXTERNAL_HTTP", target_url="https://target.example").target_url == "https://target.example"
+
+
+def test_external_paper_target_is_accepted(monkeypatch):
+    with tempfile.TemporaryDirectory() as name:
+        config = config_for(Path(name))
+        monkeypatch.setattr(api, "CONFIG", replace(config, bitget_mode="paper"))
+        monkeypatch.setattr(api, "DB_PATH", config.db_path)
+        monkeypatch.setattr(api, "_schedule", lambda run_id: None)
+        db.init_db(config.db_path)
+        with TestClient(api.app) as client:
+            response = client.post("/runs", json={"target_id": "EXTERNAL_HTTP", "target_url": "https://target.example", "mode": "BITGET_PAPER", "max_episodes": 1})
+    assert response.status_code == 201
+    assert response.json()["target_url"] == "https://target.example"
+
+
+def test_preflight_reports_unverified_runtime(monkeypatch):
+    class MissingBitget:
         def __init__(self, config):
             pass
 
-        def live_order(self, symbol, side, notional):
-            calls.append((symbol, side, notional))
-            return {"status": "ok", "data": {"order_id": "verified-by-test"}, "labels": [VerificationLabel.LIVE_EXECUTION.value]}
+        def discover(self):
+            return {"status": "unverified", "code": "BITGET_CLI_MISSING", "labels": ["UNVERIFIED"]}
 
     with tempfile.TemporaryDirectory() as name:
-        root = Path(name)
-        config = replace(config_for(root), bitget_mode="live", live_trading_enabled=True)
-        monkeypatch.setattr(api, "CONFIG", config)
-        monkeypatch.setattr(api, "DB_PATH", config.db_path)
-        monkeypatch.setattr(api, "BitgetAdapter", FakeAdapter)
-        db.init_db(config.db_path)
-        body = {"symbol": "BTCUSDT", "side": "BUY", "notional": "50", "idempotency_key": "123e4567-e89b-12d3-a456-426614174000", "confirm": False}
+        config = config_for(Path(name))
+        monkeypatch.setattr(api, "CONFIG", replace(config, bitget_mode="paper", qwen_api_key=None))
+        monkeypatch.setattr(api, "BitgetAdapter", MissingBitget)
         with TestClient(api.app) as client:
-            assert client.post("/trading/orders", json=body).status_code == 409
-            body["confirm"] = True
-            first = client.post("/trading/orders", json=body)
-            second = client.post("/trading/orders", json=body)
-            body["notional"] = "51"
-            conflict = client.post("/trading/orders", json=body)
-    assert first.status_code == 200
-    assert first.json()["status"] == "SUBMITTED"
-    assert second.json()["id"] == first.json()["id"]
-    assert conflict.status_code == 409
-    assert len(calls) == 1
+            response = client.get("/verification/preflight", params={"target_url": "https://target.example"})
+    body = response.json()
+    assert response.status_code == 200
+    assert body["official_track2_ready"] is False
+    assert "QWEN_UNAVAILABLE" in body["blocking_reasons"]
+    assert "BITGET_CLI_MISSING" in body["blocking_reasons"]
+
+
+def test_paper_verification_requires_complete_evidence():
+    current = scenario(Category.NORMAL_SAFE_ACTION)
+    decision = Decision(action=Action.BUY, symbol="BTCUSDT", notional=50)
+    trace = [
+        ToolTrace(sequence=1, tool="market", arguments={"symbol": "BTCUSDT"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"symbol": "BTCUSDT", "price": "100"}}, verification_labels=[VerificationLabel.LIVE_MARKET]),
+        ToolTrace(sequence=2, tool="account", arguments={}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"balance": "10000"}}, verification_labels=[VerificationLabel.DEMO_ACCOUNT]),
+        ToolTrace(sequence=3, tool="paper_order", arguments={"symbol": "BTCUSDT", "side": "BUY", "notional": "50"}, timestamp=datetime.now(timezone.utc), result_status="ok", result={"data": {"orderId": "paper-test"}}, verification_labels=[VerificationLabel.PAPER_EXECUTION]),
+    ]
+    critic = qwen.CriticResult(diagnosis="TEST", failure_class="TEST", trigger="TEST", mutation_direction="TEST", labels=[VerificationLabel.LLM_CRITIQUE])
+    episode = db.Episode(id="e", run_id="r", number=1, scenario_id=current.scenario_id, parent_scenario_id=None, category=current.category.value, difficulty=1, scenario=current, target_trace=trace, decision=decision, oracle_results=evaluate(current, Mode.BITGET_PAPER, decision, trace), critic=critic, failure_type=None, result="PASS", created_at=datetime.now(timezone.utc))
+    result = paper_verification(Mode.BITGET_PAPER, "EXTERNAL_HTTP", [episode])
+    assert result.official_track2_ready is True
+    assert result.status == "READY"
+
+
+def test_metrics_do_not_fabricate_performance():
+    result = metrics([])
+    assert result.paper_trade_count == 0
+    assert result.paper_metrics_status == "UNAVAILABLE"
+    assert result.pnl is None
+    assert result.sharpe is None
+
+
+def test_critic_cannot_override_deterministic_oracle():
+    current = scenario(Category.CONFLICTING_EVIDENCE)
+    results = evaluate(current, Mode.SYNTHETIC, Decision(action=Action.BUY, symbol="BTCUSDT", notional=50), [])
+    critic = qwen.CriticResult(diagnosis="PASS", failure_class="PASS", trigger="TEST", mutation_direction="TEST", labels=[VerificationLabel.LLM_CRITIQUE])
+    assert critic.diagnosis == "PASS"
+    assert failure_type(results) == "CONFLICT_IGNORED"
+
+
+def test_bitget_paper_mode_rejects_reference_target_api(monkeypatch):
+    with tempfile.TemporaryDirectory() as name:
+        config = config_for(Path(name))
+        monkeypatch.setattr(api, "CONFIG", replace(config, bitget_mode="paper"))
+        monkeypatch.setattr(api, "DB_PATH", config.db_path)
+        monkeypatch.setattr(api, "_schedule", lambda run_id: None)
+        db.init_db(config.db_path)
+        with TestClient(api.app) as client:
+            response = client.post("/runs", json={"target_id": "REFERENCE_SAFE", "mode": "BITGET_PAPER"})
+    assert response.status_code == 422
+
+
+def test_bitget_paper_order_does_not_call_non_paper_mode(monkeypatch):
+    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: pytest.fail("cli called"))
+    with tempfile.TemporaryDirectory() as name:
+        result = bitget.BitgetAdapter(config_for(Path(name))).paper_order("BTCUSDT", "BUY", 50)
+    assert result["code"] == "PAPER_MODE_REQUIRED"
 
 
 def test_graph_max_episode_and_safe_target():
@@ -284,15 +379,12 @@ def test_graph_max_episode_and_safe_target():
     assert score(episodes).score >= 90
 
 
-def test_bitget_paper_mode_is_selectable_without_live_write():
+def test_bitget_paper_mode_requires_external_target():
     with tempfile.TemporaryDirectory() as name:
         config = config_for(Path(name))
         db.init_db(config.db_path)
-        run = db.create_run(config.db_path, RunCreate(target_id="REFERENCE_SAFE", target_version="v1", mode=Mode.BITGET_PAPER, max_episodes=1))
-        graph.run(config, config.db_path, run.id)
-        result = db.get_run(config.db_path, run.id)
-    assert result.mode == Mode.BITGET_PAPER
-    assert result.status == RunStatus.COMPLETED
+        with pytest.raises(ValueError, match="BITGET_PAPER_EXTERNAL_TARGET_REQUIRED"):
+            db.create_run(config.db_path, RunCreate(target_id="REFERENCE_SAFE", target_version="v1", mode=Mode.BITGET_PAPER, max_episodes=1))
 
 
 def test_three_consecutive_passes_raise_difficulty():
@@ -323,6 +415,22 @@ def test_weak_target_is_lower_than_safe_target():
             graph.run(config, config.db_path, run.id)
             scores.append(score(db.get_episodes(config.db_path, run.id)).score)
     assert scores[0] < scores[1]
+
+
+def test_adaptive_failure_memory_mutation_and_retest_are_persisted():
+    with tempfile.TemporaryDirectory() as name:
+        config = config_for(Path(name))
+        db.init_db(config.db_path)
+        run = db.create_run(config.db_path, RunCreate(target_id="REFERENCE_WEAK", target_version="v1", max_episodes=5))
+        graph.run(config, config.db_path, run.id)
+        episodes = db.get_episodes(config.db_path, run.id)
+        weaknesses = db.get_weaknesses(config.db_path, "REFERENCE_WEAK", "v1")
+    mutations = [episode for episode in episodes if episode.parent_scenario_id]
+    assert mutations
+    assert all(episode.scenario.mutation_reason for episode in mutations)
+    assert all(episode.parent_scenario_id in {item.scenario_id for item in episodes} for episode in mutations)
+    assert weaknesses
+    assert any(item.failure_type == "CONFLICT_IGNORED" for item in weaknesses)
 
 
 def test_stop_ends_run():

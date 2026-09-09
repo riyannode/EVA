@@ -26,9 +26,38 @@ Select `REFERENCE_WEAK`, version `v1`, mode `SYNTHETIC`, 12 episodes, and diffic
 
 Start a second run with `REFERENCE_SAFE` and the same settings. It refuses blocked symbols, escalates when takeover is required, respects sizing, and should produce a higher readiness score.
 
-## Paper benchmark switch
+## Official Track 2 paper benchmark
 
-Select `BITGET_PAPER` to exercise the same benchmark loop with the paper adapter. Read and execution evidence must retain separate labels. Without a configured `bgc` installation and demo credentials, Bitget evidence remains `UNVERIFIED`; the run must not be described as live execution.
+Configure `BITGET_MODE=paper`, select `EXTERNAL_HTTP`, provide the external target URL, and run `GET /verification/preflight?target_url=...`. A complete Track 2 run needs market/account evidence, a safe target BUY/SELL decision, a `paper_order`, a verifiable paper order reference, `PAPER_EXECUTION`, oracle reconciliation, persisted episode evidence, critic output, and metrics. Without `bgc`, paper credentials, or Qwen credentials, the relevant status remains `UNVERIFIED`.
+
+`REFERENCE_WEAK` and `REFERENCE_SAFE` remain local deterministic verification fixtures and do not qualify as the official Track 2 paper target.
+
+## After credentials arrive
+
+From `backend`, configure the supported environment values and the official `bgc` authentication/setup:
+
+```powershell
+$env:EVA_MODEL = 'qwen3.8-max'
+$env:EVA_LLM_BASE_URL = 'https://hackathon.bitgetops.com/v1'
+$env:BITGET_QWEN_API_KEY = '<provided-qwen-key>'
+$env:BITGET_MODE = 'paper'
+$env:BITGET_EXECUTABLE = 'bgc'
+```
+
+Run the backend, call preflight, then create the external-target paper run:
+
+```powershell
+uv run fastapi dev app.py
+Invoke-RestMethod 'http://localhost:8000/verification/preflight?target_url=https%3A%2F%2Ftarget.example'
+$body = @{ target_id = 'EXTERNAL_HTTP'; target_version = 'target-v1'; target_url = 'https://target.example'; mode = 'BITGET_PAPER'; max_episodes = 20; difficulty = 1 } | ConvertTo-Json
+$run = Invoke-RestMethod http://localhost:8000/runs -Method Post -ContentType 'application/json' -Body $body
+Invoke-RestMethod "http://localhost:8000/runs/$($run.id)/events"
+Invoke-RestMethod "http://localhost:8000/runs/$($run.id)/verification"
+Invoke-RestMethod "http://localhost:8000/runs/$($run.id)/metrics"
+Invoke-RestMethod "http://localhost:8000/runs/$($run.id)/score"
+```
+
+Only the resulting persisted `PAPER_EXECUTION` order reference, target trace, oracle result, verification summary, and metrics can establish runtime evidence. Do not reuse this sequence for a missing or ambiguous paper result.
 
 ## API smoke flow
 

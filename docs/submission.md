@@ -14,7 +14,7 @@ The reference weak and safe targets run through the same adaptive benchmark. Det
 
 ## Progress
 
-V1 includes the typed backend contracts, SQLite records, LangGraph loop, Qwen transport and fallback, HTTP target contract, reference targets, paper and gated live Bitget adapters, FastAPI API, live event stream, and React console. Qwen and Bitget execution evidence are conditional on configured credentials/tools and are not claimed without runtime evidence.
+V1 includes the typed backend contracts, SQLite records, LangGraph loop, Qwen transport and fallback, HTTP target contract, reference targets, paper-only Bitget adapter, FastAPI API, event stream, evaluation metrics, and React console. Qwen and Bitget paper execution evidence are conditional on configured credentials/tools and are not claimed without runtime evidence.
 
 ## Deliverables
 
@@ -22,6 +22,7 @@ V1 includes the typed backend contracts, SQLite records, LangGraph loop, Qwen tr
 - Synthetic weak-versus-safe demo.
 - `SYNTHETIC` and `BITGET_PAPER` mode switch.
 - Deterministic oracle and readiness evidence.
+- Track 2 paper acceptance and preflight evidence.
 - Flat dashboard for runs, episodes, score, and weaknesses.
 
 ## LLM role

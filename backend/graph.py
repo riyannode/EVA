@@ -8,10 +8,11 @@ from langgraph.graph import END, START, StateGraph
 
 import db
 import qwen
+from bitget import BitgetAdapter, discovered_symbols
 from config import Config
 from models import Category, CriticResult, Decision, Mode, OracleResult, RunStatus, Scenario, ToolTrace
 from oracle import evaluate, failure_type
-from score import score
+from score import paper_verification, score
 from target import TargetResult, register_target, run_target
 
 
@@ -133,6 +134,18 @@ def _probe_scenario(scenario: Scenario) -> Scenario:
 def run_target_node(state: RunState) -> RunState:
     scenario = _scenario(state)
     target_url, target_token = target_for_run(state["run_id"])
+    if state["mode"] == Mode.BITGET_PAPER.value:
+        discovery = BitgetAdapter(runtime_config()).discover()
+        db.add_event(db_path(state), state["run_id"], "BITGET_DISCOVERY", discovery)
+        symbols = discovered_symbols(discovery.get("data"))
+        allowed = [symbol for symbol in symbols if symbol in scenario.policy.allowed_symbols]
+        if discovery.get("status") != "ok" or not allowed:
+            state.update({"target_trace": [], "target_decision": None, "target_error": discovery.get("code") or "BITGET_MARKET_UNVERIFIED"})
+            db.update_run(db_path(state), state["run_id"], stage="RUN_TARGET")
+            db.add_event(db_path(state), state["run_id"], "TARGET_COMPLETED", {"trace_steps": 0, "action": None, "error": state["target_error"]})
+            return state
+        scenario = scenario.model_copy(update={"policy": scenario.policy.model_copy(update={"allowed_symbols": [allowed[0]]})})
+        state["scenario"] = scenario.model_dump(mode="json")
     result = run_target(state["target_id"], target_url, target_token, state["run_id"], f"{state['run_id']}-{state['episode']}", scenario, Mode(state["mode"]), runtime_config())
     state.update({"target_trace": [item.model_dump(mode="json") for item in result.trace], "target_decision": result.decision.model_dump(mode="json") if result.decision else None, "target_error": result.error})
     db.update_run(db_path(state), state["run_id"], stage="RUN_TARGET")
@@ -178,7 +191,7 @@ def save_memory_node(state: RunState) -> RunState:
 def _three_passes(path, run_id: str, category: str) -> bool:
     episodes = db.get_episodes(path, run_id)
     recent = episodes[-3:]
-    return len(recent) == 3 and all(episode.failure_type is None for episode in recent)
+    return len(recent) == 3 and all(episode.category == category and episode.failure_type is None for episode in recent)
 
 
 def route_node(state: RunState) -> RunState:
@@ -217,8 +230,12 @@ def harder_node(state: RunState) -> RunState:
 
 def finish_node(state: RunState) -> RunState:
     status = RunStatus.STOPPED if db.stop_requested(db_path(state), state["run_id"]) else RunStatus.COMPLETED
+    run = db.get_run(db_path(state), state["run_id"])
+    episodes = db.get_episodes(db_path(state), state["run_id"])
+    verification = paper_verification(run.mode, run.target_id, episodes)
     db.update_run(db_path(state), state["run_id"], status=status, stage="FINISH", failure=state.get("failure_type"), finished=True)
-    db.add_event(db_path(state), state["run_id"], "RUN_FINISHED", {"status": status.value, "score": score(db.get_episodes(db_path(state), state["run_id"])).score})
+    db.add_event(db_path(state), state["run_id"], "RUN_VERIFICATION", verification.model_dump(mode="json"))
+    db.add_event(db_path(state), state["run_id"], "RUN_FINISHED", {"status": status.value, "score": score(episodes).score, "official_track2_ready": verification.official_track2_ready, "verification_status": verification.status})
     state["status"] = status.value
     return state
 
