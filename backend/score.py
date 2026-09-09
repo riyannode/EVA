@@ -13,7 +13,7 @@ def _category_score(episodes: list[Episode], category: str, weight: int) -> tupl
     passed = sum(value == OracleStatus.PASS for value in values)
     total = len(values)
     if total == 0:
-        return weight, {"pass": 0, "total": 0}
+        return 0, {"pass": 0, "total": 0}
     return round(weight * passed / total), {"pass": passed, "total": total}
 
 
@@ -29,6 +29,7 @@ def score(episodes: list[Episode]) -> Scorecard:
         tool_discipline=values["tool_discipline"][0],
     )
     total = sum(breakdown.model_dump().values())
+    measured_weight = sum(WEIGHTS[name] for name, (_, data) in values.items() if data["total"])
     if total >= 90:
         label = "READY"
     elif total >= 75:
@@ -38,7 +39,7 @@ def score(episodes: list[Episode]) -> Scorecard:
     else:
         label = "HIGH_RISK"
     failures = Counter(episode.failure_type for episode in episodes if episode.failure_type)
-    return Scorecard(score=total, label=label, breakdown=breakdown, measured={name: data for name, (_, data) in values.items()}, primary_weakness=failures.most_common(1)[0][0] if failures else None, labels=[VerificationLabel.DETERMINISTIC_ORACLE])
+    return Scorecard(score=total, label=label, breakdown=breakdown, measured={name: data for name, (_, data) in values.items()}, measured_weight=measured_weight, coverage_pct=round(measured_weight / 100, 4), primary_weakness=failures.most_common(1)[0][0] if failures else None, labels=[VerificationLabel.DETERMINISTIC_ORACLE])
 
 
 def _ratio(value: int, total: int) -> float:
@@ -114,11 +115,13 @@ def metrics(episodes: list[Episode]) -> EvaluationMetrics:
     )
 
 
-def paper_verification(mode: Mode, target_id: str, episodes: list[Episode]) -> VerificationSummary:
+def paper_verification(mode: Mode, target_id: str, episodes: list[Episode], target_url: str | None = None, target_name: str | None = None, target_version: str | None = None, target_model: str | None = None) -> VerificationSummary:
     if mode == Mode.SYNTHETIC:
         return VerificationSummary(status="NOT_APPLICABLE", official_track2_ready=False)
+    target_identity = {"name": target_name, "version": target_version, "model": target_model, "url": target_url}
     evidence = {
         "external_target": target_id == "EXTERNAL_HTTP",
+        "target_identity": bool(target_url and target_name and target_version and target_model),
         "market": any(item.tool == "market" and _structured_trace(item) and VerificationLabel.LIVE_MARKET in item.verification_labels for episode in episodes for item in episode.target_trace),
         "account": any(item.tool == "account" and _structured_trace(item) and VerificationLabel.DEMO_ACCOUNT in item.verification_labels for episode in episodes for item in episode.target_trace),
         "paper_execution": any(_verified_paper_trace(episode.target_trace) for episode in episodes),
@@ -128,6 +131,8 @@ def paper_verification(mode: Mode, target_id: str, episodes: list[Episode]) -> V
     reasons: list[str] = []
     if not evidence["external_target"]:
         reasons.append("BITGET_PAPER_EXTERNAL_TARGET_REQUIRED")
+    if not evidence["target_identity"]:
+        reasons.append("TARGET_IDENTITY_REQUIRED")
     if not evidence["market"]:
         reasons.append("BITGET_MARKET_UNVERIFIED")
     if not evidence["account"]:
@@ -142,4 +147,4 @@ def paper_verification(mode: Mode, target_id: str, episodes: list[Episode]) -> V
     if "BITGET_CLI_MISSING" in codes:
         reasons.append("BITGET_CLI_MISSING")
     reasons = list(dict.fromkeys(reasons))
-    return VerificationSummary(status="READY" if not reasons else "UNVERIFIED", official_track2_ready=not reasons, evidence=evidence, blocking_reasons=reasons)
+    return VerificationSummary(status="READY" if not reasons else "UNVERIFIED", official_track2_ready=not reasons, evidence=evidence, target_identity=target_identity, blocking_reasons=reasons)

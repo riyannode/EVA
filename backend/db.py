@@ -56,6 +56,8 @@ def init_db(path: Path) -> None:
                 id TEXT PRIMARY KEY,
                 target_id TEXT NOT NULL,
                 target_version TEXT NOT NULL,
+                target_name TEXT,
+                target_model TEXT,
                 target_url TEXT,
                 mode TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -112,6 +114,10 @@ def init_db(path: Path) -> None:
             """
         )
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+        if "target_name" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN target_name TEXT")
+        if "target_model" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN target_model TEXT")
         if "target_url" not in columns:
             connection.execute("ALTER TABLE runs ADD COLUMN target_url TEXT")
         connection.execute("DROP TABLE IF EXISTS live_orders")
@@ -122,8 +128,8 @@ def create_run(path: Path, request: RunCreate) -> Run:
     created = now()
     with _session(path) as connection:
         connection.execute(
-            "INSERT INTO runs (id, target_id, target_version, target_url, mode, status, difficulty, max_episodes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (run_id, request.target_id, request.target_version, request.target_url, request.mode.value, RunStatus.CREATED.value, request.difficulty, request.max_episodes, created.isoformat()),
+            "INSERT INTO runs (id, target_id, target_version, target_name, target_model, target_url, mode, status, difficulty, max_episodes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, request.target_id, request.target_version, request.target_name, request.target_model, request.target_url, request.mode.value, RunStatus.CREATED.value, request.difficulty, request.max_episodes, created.isoformat()),
         )
     return get_run(path, run_id)
 
@@ -133,6 +139,8 @@ def _run(row: sqlite3.Row) -> Run:
         id=row["id"],
         target_id=row["target_id"],
         target_version=row["target_version"],
+        target_name=row["target_name"],
+        target_model=row["target_model"],
         target_url=row["target_url"],
         mode=Mode(row["mode"]),
         status=RunStatus(row["status"]),
@@ -196,6 +204,23 @@ def update_run(path: Path, run_id: str, status: RunStatus | None = None, stage: 
     return get_run(path, run_id)
 
 
+def _update_weakness(connection: sqlite3.Connection, run: Run, failure: str, category: str, failed: bool, created: datetime) -> None:
+    existing = connection.execute(
+        "SELECT id, attempts, fails, passes FROM weaknesses WHERE target_id = ? AND target_version = ? AND failure_type = ? AND category = ?",
+        (run.target_id, run.target_version, failure, category),
+    ).fetchone()
+    if existing:
+        connection.execute(
+            "UPDATE weaknesses SET attempts = ?, fails = ?, passes = ?, updated_at = ? WHERE id = ?",
+            (existing["attempts"] + 1, existing["fails"] + int(failed), existing["passes"] + int(not failed), created.isoformat(), existing["id"]),
+        )
+    else:
+        connection.execute(
+            "INSERT INTO weaknesses (target_id, target_version, failure_type, category, attempts, fails, passes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (run.target_id, run.target_version, failure, category, 1, int(failed), int(not failed), created.isoformat()),
+        )
+
+
 def insert_episode(path: Path, run: Run, scenario: Scenario, trace: list[ToolTrace], decision: Decision | None, oracle_results: list[OracleResult], critic: CriticResult, failure_type: str | None, result: str) -> Episode:
     episode_id = str(uuid.uuid4())
     created = now()
@@ -204,21 +229,11 @@ def insert_episode(path: Path, run: Run, scenario: Scenario, trace: list[ToolTra
             "INSERT INTO episodes (id, run_id, number, scenario_id, parent_scenario_id, category, difficulty, scenario_json, target_trace_json, decision_json, oracle_json, critic_json, failure_type, result, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (episode_id, run.id, run.episode, scenario.scenario_id, scenario.parent_scenario_id, scenario.category.value, scenario.difficulty, _text(scenario), _text(trace), _text(decision) if decision else None, _text(oracle_results), _text(critic), failure_type, result, created.isoformat()),
         )
-        key_failure = failure_type or "PASS"
-        existing = connection.execute(
-            "SELECT id, attempts, fails, passes FROM weaknesses WHERE target_id = ? AND target_version = ? AND failure_type = ? AND category = ?",
-            (run.target_id, run.target_version, key_failure, scenario.category.value),
-        ).fetchone()
-        if existing:
-            connection.execute(
-                "UPDATE weaknesses SET attempts = ?, fails = ?, passes = ?, updated_at = ? WHERE id = ?",
-                (existing["attempts"] + 1, existing["fails"] + (1 if failure_type else 0), existing["passes"] + (0 if failure_type else 1), created.isoformat(), existing["id"]),
-            )
-        else:
-            connection.execute(
-                "INSERT INTO weaknesses (target_id, target_version, failure_type, category, attempts, fails, passes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (run.target_id, run.target_version, key_failure, scenario.category.value, 1, 1 if failure_type else 0, 0 if failure_type else 1, created.isoformat()),
-            )
+        targeted_failure = scenario.mutation_reason if scenario.parent_scenario_id and scenario.mutation_reason else None
+        if targeted_failure:
+            _update_weakness(connection, run, targeted_failure, scenario.category.value, failure_type == targeted_failure, created)
+        if failure_type and failure_type != targeted_failure:
+            _update_weakness(connection, run, failure_type, scenario.category.value, True, created)
     update_run(path, run.id, stage="SAVE_MEMORY", failure=failure_type)
     return Episode(id=episode_id, run_id=run.id, number=run.episode, scenario_id=scenario.scenario_id, parent_scenario_id=scenario.parent_scenario_id, category=scenario.category.value, difficulty=scenario.difficulty, scenario=scenario, target_trace=trace, decision=decision, oracle_results=oracle_results, critic=critic, failure_type=failure_type, result=result, created_at=created)
 

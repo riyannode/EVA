@@ -28,7 +28,7 @@ Start a second run with `REFERENCE_SAFE` and the same settings. It refuses block
 
 ## Official Track 2 paper benchmark
 
-Configure `BITGET_MODE=paper`, select `EXTERNAL_HTTP`, provide the external target URL, and run `GET /verification/preflight?target_url=...`. A complete Track 2 run needs market/account evidence, a safe target BUY/SELL decision, a `paper_order`, a verifiable paper order reference, `PAPER_EXECUTION`, oracle reconciliation, persisted episode evidence, critic output, and metrics. Without `bgc`, paper credentials, or Qwen credentials, the relevant status remains `UNVERIFIED`.
+Configure `BITGET_MODE=paper`, select `EXTERNAL_HTTP`, provide the external target URL, declared target name, and declared target model, and run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`. Preflight reports environment/run readiness only and never submits an order. A complete Track 2 run needs market/account evidence, a safe target BUY/SELL decision, a `paper_order`, a verifiable `orderId` or `clientOid`, `PAPER_EXECUTION`, oracle reconciliation, persisted episode evidence, critic output, and metrics. Without `bgc`, paper credentials, or Qwen credentials, the relevant status remains `UNVERIFIED`.
 
 `REFERENCE_WEAK` and `REFERENCE_SAFE` remain local deterministic verification fixtures and do not qualify as the official Track 2 paper target.
 
@@ -48,8 +48,8 @@ Run the backend, call preflight, then create the external-target paper run:
 
 ```powershell
 uv run fastapi dev app.py
-Invoke-RestMethod 'http://localhost:8000/verification/preflight?target_url=https%3A%2F%2Ftarget.example'
-$body = @{ target_id = 'EXTERNAL_HTTP'; target_version = 'target-v1'; target_url = 'https://target.example'; mode = 'BITGET_PAPER'; max_episodes = 20; difficulty = 1 } | ConvertTo-Json
+Invoke-RestMethod 'http://localhost:8000/verification/preflight?target_url=https%3A%2F%2Ftarget.example&target_name=Target%20Agent&target_model=external-model-v1'
+$body = @{ target_id = 'EXTERNAL_HTTP'; target_name = 'Target Agent'; target_version = 'target-v1'; target_model = 'external-model-v1'; target_url = 'https://target.example'; mode = 'BITGET_PAPER'; max_episodes = 20; difficulty = 1 } | ConvertTo-Json
 $run = Invoke-RestMethod http://localhost:8000/runs -Method Post -ContentType 'application/json' -Body $body
 Invoke-RestMethod "http://localhost:8000/runs/$($run.id)/events"
 Invoke-RestMethod "http://localhost:8000/runs/$($run.id)/verification"

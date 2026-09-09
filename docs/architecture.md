@@ -10,7 +10,7 @@ The backend has one LangGraph `StateGraph`:
 
 ## Target protocol
 
-External targets receive a POST body containing `run_id`, `episode_id`, the typed scenario, the standardized tool list, `max_steps`, and accumulated tool results. They return either a validated tool call or a validated final decision. Responses have a timeout and byte cap; the tool loop is capped at eight steps.
+External targets receive a POST body containing `run_id`, `episode_id`, the typed scenario, the standardized tool list, `max_steps`, and accumulated tool results. They return either a validated tool call or a validated final decision. Responses have a timeout and byte cap; the tool loop is capped at eight steps. Official paper runs persist declared target name, version, model, and URL; these declarations identify the run but do not prove which model executed remotely.
 
 Reference targets are deliberately small demo fixtures. They demonstrate how EVA detects different behavior and are not trading products.
 
@@ -28,7 +28,7 @@ Reference targets are deliberately small demo fixtures. They demonstrate how EVA
 
 ## Bitget
 
-`bitget.py` invokes a fixed executable with argument arrays and `shell=False`. It exposes discovery, market ticker, candles, account overview, and paper order. Paper execution is the only Bitget write path; an order is verified only when the CLI response contains an order reference. The evaluation graph exposes only standardized paper tools to external targets.
+`bitget.py` invokes a fixed executable with argument arrays and `shell=False`. It exposes `bgc discover`, `market --action tickers|candles --category SPOT`, `account_overview --coin USDT`, and paper order. A paper BUY maps EVA quote notional to Bitget `qty`; a SELL converts quote notional using a verified market price and available runtime quantity constraints, failing closed when conversion is unverified. Paper execution is the only Bitget write path; an order is verified only when the CLI response contains `orderId` or `clientOid`. The evaluation graph exposes only standardized paper tools to external targets.
 
 ## Frontend
 

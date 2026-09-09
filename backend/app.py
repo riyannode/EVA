@@ -10,9 +10,9 @@ from fastapi.responses import StreamingResponse
 
 import db
 import graph
-from bitget import BitgetAdapter, BitgetError, discovered_symbols
+from bitget import BitgetAdapter, BitgetError, structured_result
 from config import Config, load_config
-from models import EvaluationMetrics, Mode, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
+from models import EvaluationMetrics, Mode, Policy, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
 from score import metrics, paper_verification, score
 
 
@@ -55,13 +55,8 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _structured_result(result: dict[str, object]) -> bool:
-    data = result.get("data")
-    return result.get("status") == "ok" and isinstance(data, (dict, list)) and bool(data) and not (isinstance(data, dict) and "output" in data)
-
-
 @app.get("/verification/preflight")
-def verification_preflight(target_url: str | None = None) -> dict[str, object]:
+def verification_preflight(target_url: str | None = None, target_name: str | None = None, target_model: str | None = None) -> dict[str, object]:
     reasons: list[str] = []
     if CONFIG.qwen_api_key:
         qwen_status = "CONFIGURED"
@@ -71,6 +66,8 @@ def verification_preflight(target_url: str | None = None) -> dict[str, object]:
     external_ready = bool(target_url and urlparse(target_url).scheme in {"http", "https"})
     if not external_ready:
         reasons.append("TARGET_URL_REQUIRED")
+    if not target_name or not target_model:
+        reasons.append("TARGET_IDENTITY_REQUIRED")
     adapter = BitgetAdapter(CONFIG)
     discovery = adapter.discover()
     cli_ready = discovery.get("status") == "ok"
@@ -78,16 +75,17 @@ def verification_preflight(target_url: str | None = None) -> dict[str, object]:
         reasons.append("BITGET_CLI_MISSING")
     elif not cli_ready:
         reasons.append("BITGET_PAPER_UNAVAILABLE")
-    symbols = discovered_symbols(discovery.get("data")) if _structured_result(discovery) else []
-    market_ready = False
+    paper_contract = adapter.paper_order_contract() if cli_ready else None
+    paper_ready = CONFIG.bitget_mode == "paper" and paper_contract is not None and structured_result(paper_contract)
+    if not paper_ready:
+        reasons.append("BITGET_PAPER_UNAVAILABLE")
+    symbol, market = adapter.resolve_symbol(Policy().allowed_symbols) if cli_ready else (None, None)
+    market_ready = symbol is not None and market is not None and structured_result(market)
     account_ready = False
-    if cli_ready and symbols:
+    if cli_ready:
         try:
-            market_ready = _structured_result(adapter.market_ticker(symbols[0]))
-        except BitgetError:
-            market_ready = False
-        try:
-            account_ready = _structured_result(adapter.account())
+            account = adapter.account()
+            account_ready = account.get("status") == "ok" and "DEMO_ACCOUNT" in account.get("labels", []) and structured_result(account)
         except BitgetError:
             account_ready = False
     if not market_ready:
@@ -96,16 +94,18 @@ def verification_preflight(target_url: str | None = None) -> dict[str, object]:
         reasons.append("BITGET_ACCOUNT_UNVERIFIED")
     if CONFIG.bitget_mode != "paper":
         reasons.append("BITGET_PAPER_UNAVAILABLE")
-    reasons.append("PAPER_EXECUTION_NOT_VERIFIED")
     reasons = list(dict.fromkeys(reasons))
+    environment_ready = not reasons
     return {
         "qwen": qwen_status,
         "bitget_cli": "READY" if cli_ready else "UNVERIFIED",
         "bitget_market": "READY" if market_ready else "UNVERIFIED",
         "bitget_account": "READY" if account_ready else "UNVERIFIED",
-        "bitget_paper": "UNVERIFIED",
+        "bitget_paper": "READY" if paper_ready else "UNVERIFIED",
         "external_target": "READY" if external_ready else "UNVERIFIED",
-        "official_track2_ready": not reasons,
+        "paper_run_ready": environment_ready,
+        "environment_ready": environment_ready,
+        "official_track2_ready": environment_ready,
         "blocking_reasons": reasons,
     }
 
@@ -126,7 +126,7 @@ async def create_run(request: RunCreate) -> Run:
     run = db.create_run(DB_PATH, request)
     REQUESTS[run.id] = request
     graph.set_target(run.id, request.target_url, request.target_token)
-    db.add_event(DB_PATH, run.id, "RUN_CREATED", {"target_id": run.target_id, "mode": run.mode.value, "max_episodes": run.max_episodes})
+    db.add_event(DB_PATH, run.id, "RUN_CREATED", {"target_id": run.target_id, "target_name": run.target_name, "target_version": run.target_version, "target_model": run.target_model, "mode": run.mode.value, "max_episodes": run.max_episodes})
     _schedule(run.id)
     return run
 
@@ -162,7 +162,7 @@ def run_score(run_id: str) -> Scorecard:
 @app.get("/runs/{run_id}/verification", response_model=VerificationSummary)
 def run_verification(run_id: str) -> VerificationSummary:
     run = _run(run_id)
-    return paper_verification(run.mode, run.target_id, db.get_episodes(DB_PATH, run_id))
+    return paper_verification(run.mode, run.target_id, db.get_episodes(DB_PATH, run_id), run.target_url, run.target_name, run.target_version, run.target_model)
 
 
 @app.get("/runs/{run_id}/metrics", response_model=EvaluationMetrics)

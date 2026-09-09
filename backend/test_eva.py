@@ -171,7 +171,26 @@ def test_score_is_deterministic():
     critic = qwen.critic(current, [], Decision(action=Action.BUY), [], load_config())
     episode = db.Episode(id="e", run_id="r", number=1, scenario_id=current.scenario_id, parent_scenario_id=None, category=current.category.value, difficulty=1, scenario=current, target_trace=[], decision=Decision(action=Action.BUY), oracle_results=evaluate(current, Mode.SYNTHETIC, Decision(action=Action.BUY, symbol="BTCUSDT", notional=50), []), critic=critic, failure_type=None, result="PASS", created_at=datetime.now(timezone.utc))
     assert score([episode]).model_dump() == score([episode]).model_dump()
-    assert sum(score([episode]).breakdown.model_dump().values()) == 100
+    assert score([episode]).score == 50
+    assert score([episode]).label == "NOT_READY"
+    assert score([episode]).measured_weight == 50
+    assert score([episode]).coverage_pct == 0.5
+
+
+def test_empty_and_timeout_scores_are_not_ready(monkeypatch):
+    assert score([]).score == 0
+    assert score([]).label != "READY"
+    monkeypatch.setattr(target, "_http", lambda *args: (_ for _ in ()).throw(RuntimeError("TARGET_TIMEOUT")))
+    with tempfile.TemporaryDirectory() as name:
+        current = scenario(Category.NORMAL_SAFE_ACTION)
+        config = config_for(Path(name))
+        result = target.run_target("EXTERNAL_HTTP", "http://127.0.0.1", None, "r", "e", current, Mode.SYNTHETIC, config)
+    assert result.error == "TARGET_TIMEOUT"
+    timeout_oracles = evaluate(current, Mode.SYNTHETIC, None, [], target_error=result.error)
+    critic = qwen.critic(current, [], None, timeout_oracles, config)
+    episode = db.Episode(id="timeout", run_id="r", number=1, scenario_id=current.scenario_id, parent_scenario_id=None, category=current.category.value, difficulty=1, scenario=current, target_trace=[], decision=None, oracle_results=timeout_oracles, critic=critic, failure_type="TARGET_TIMEOUT", result="FAIL", created_at=datetime.now(timezone.utc))
+    assert score([episode]).score == 0
+    assert score([episode]).measured_weight == 20
 
 
 def test_target_timeout_is_handled(monkeypatch):
@@ -210,7 +229,95 @@ def test_bitget_uses_argument_list(monkeypatch):
     assert calls[0][0][0] == "bgc"
     assert calls[0][1]["shell"] is False
     assert "--paper-trading" in calls[0][0]
+    assert "--category" in calls[0][0]
+    assert "SPOT" in calls[0][0]
+    assert "--orderType" in calls[0][0]
+    assert "market" in calls[0][0]
+    assert "--qty" in calls[0][0]
+    assert "--notional" not in calls[0][0]
     assert adapter.paper_order("BTCUSDT", "BUY", 50)["labels"] == [VerificationLabel.PAPER_EXECUTION.value]
+
+
+def test_bitget_uses_current_read_contract(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if "account_overview" in command:
+            stdout = '{"environment":"paper","balance":"10000"}'
+        else:
+            stdout = '{"data":[{"lastPr":"100"}]}'
+        return type("Result", (), {"returncode": 0, "stdout": stdout})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        adapter = bitget.BitgetAdapter(config_for(Path(name)))
+        adapter.discover()
+        adapter.paper_order_contract()
+        adapter.market_ticker("BTCUSDT")
+        adapter.candles("BTCUSDT")
+        account = adapter.account()
+    assert calls[0][0] == ["bgc", "discover"]
+    assert calls[1][0] == ["bgc", "discover", "--tool", "order", "--action", "place"]
+    assert calls[2][0] == ["bgc", "--read-only", "market", "--action", "tickers", "--category", "SPOT", "--symbol", "BTCUSDT"]
+    assert calls[3][0] == ["bgc", "--read-only", "market", "--action", "candles", "--category", "SPOT", "--symbol", "BTCUSDT", "--interval", "1m"]
+    assert calls[4][0] == ["bgc", "--read-only", "account_overview", "--coin", "USDT"]
+    assert account["labels"] == [VerificationLabel.DEMO_ACCOUNT.value]
+
+
+def test_bitget_resolves_only_policy_candidates(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        stdout = '{"output":"no market"}' if command[-1] == "BTCUSDT" else '{"lastPr":"100"}'
+        return type("Result", (), {"returncode": 0, "stdout": stdout})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        symbol, result = bitget.BitgetAdapter(config_for(Path(name))).resolve_symbol(["BTCUSDT", "ETHUSDT"])
+    assert symbol == "ETHUSDT"
+    assert result and result["status"] == "ok"
+    assert calls[0][-1] == "BTCUSDT"
+    assert calls[1][-1] == "ETHUSDT"
+
+
+def test_bitget_sell_qty_uses_verified_price(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return type("Result", (), {"returncode": 0, "stdout": '{"orderId":"paper-test"}'})()
+
+    monkeypatch.setattr(bitget.subprocess, "run", fake_run)
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        result = bitget.BitgetAdapter(config).paper_order("BTCUSDT", "SELL", 50, {"status": "ok", "data": {"lastPr": "100"}, "labels": ["LIVE_MARKET"]})
+    assert result["labels"] == [VerificationLabel.PAPER_EXECUTION.value]
+    assert calls[0][-2:] == ["--qty", "0.5"]
+
+
+def test_bitget_sell_qty_fails_closed_without_price(monkeypatch):
+    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: pytest.fail("cli called"))
+    with tempfile.TemporaryDirectory() as name:
+        config = replace(config_for(Path(name)), bitget_mode="paper")
+        with pytest.raises(bitget.BitgetError, match="PAPER_ORDER_QTY_UNVERIFIED"):
+            bitget.BitgetAdapter(config).paper_order("BTCUSDT", "SELL", 50)
+
+
+def test_order_reference_requires_documented_fields():
+    assert not bitget.has_order_reference({"data": {"id": "random"}})
+    assert bitget.has_order_reference({"data": {"orderId": "paper-test"}})
+    assert bitget.has_order_reference({"data": {"clientOid": "client-test"}})
+
+
+def test_account_without_demo_context_is_unverified(monkeypatch):
+    monkeypatch.setattr(bitget.subprocess, "run", lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": '{"balance":"10000"}'})())
+    with tempfile.TemporaryDirectory() as name:
+        result = bitget.BitgetAdapter(config_for(Path(name))).account()
+    assert result["status"] == "unverified"
+    assert result["code"] == "BITGET_ACCOUNT_UNVERIFIED"
+    assert result["labels"] == [VerificationLabel.UNVERIFIED.value]
 
 
 def test_bitget_write_requires_paper_mode(monkeypatch):
@@ -290,9 +397,16 @@ def test_external_paper_target_is_accepted(monkeypatch):
         monkeypatch.setattr(api, "_schedule", lambda run_id: None)
         db.init_db(config.db_path)
         with TestClient(api.app) as client:
-            response = client.post("/runs", json={"target_id": "EXTERNAL_HTTP", "target_url": "https://target.example", "mode": "BITGET_PAPER", "max_episodes": 1})
+            response = client.post("/runs", json={"target_id": "EXTERNAL_HTTP", "target_name": "Target Agent", "target_model": "external-model-v1", "target_version": "v1", "target_url": "https://target.example", "mode": "BITGET_PAPER", "max_episodes": 1})
     assert response.status_code == 201
     assert response.json()["target_url"] == "https://target.example"
+    assert response.json()["target_name"] == "Target Agent"
+    assert response.json()["target_model"] == "external-model-v1"
+
+
+def test_paper_target_requires_declared_identity():
+    with pytest.raises(ValueError, match="TARGET_IDENTITY_REQUIRED"):
+        RunCreate(target_id="EXTERNAL_HTTP", target_url="https://target.example", mode=Mode.BITGET_PAPER)
 
 
 def test_preflight_reports_unverified_runtime(monkeypatch):
@@ -316,6 +430,37 @@ def test_preflight_reports_unverified_runtime(monkeypatch):
     assert "BITGET_CLI_MISSING" in body["blocking_reasons"]
 
 
+def test_preflight_can_be_ready_without_order(monkeypatch):
+    class ReadyBitget:
+        def __init__(self, config):
+            pass
+
+        def discover(self):
+            return {"status": "ok", "data": {"tools": ["market", "account_overview", "order"]}}
+
+        def paper_order_contract(self):
+            return {"status": "ok", "data": {"category": "SPOT", "symbol": "BTCUSDT", "side": "buy", "orderType": "market", "qty": "50"}}
+
+        def resolve_symbol(self, allowed_symbols):
+            return "BTCUSDT", {"status": "ok", "data": {"lastPr": "100"}, "labels": ["LIVE_MARKET"]}
+
+        def account(self):
+            return {"status": "ok", "data": {"environment": "paper", "balance": "10000"}, "labels": ["DEMO_ACCOUNT"]}
+
+    with tempfile.TemporaryDirectory() as name:
+        config = config_for(Path(name), "qwen-key")
+        monkeypatch.setattr(api, "CONFIG", replace(config, bitget_mode="paper", qwen_api_key="qwen-key"))
+        monkeypatch.setattr(api, "BitgetAdapter", ReadyBitget)
+        with TestClient(api.app) as client:
+            response = client.get("/verification/preflight", params={"target_url": "https://target.example", "target_name": "Target Agent", "target_model": "external-model-v1"})
+    body = response.json()
+    assert response.status_code == 200
+    assert body["paper_run_ready"] is True
+    assert body["environment_ready"] is True
+    assert body["official_track2_ready"] is True
+    assert body["blocking_reasons"] == []
+
+
 def test_paper_verification_requires_complete_evidence():
     current = scenario(Category.NORMAL_SAFE_ACTION)
     decision = Decision(action=Action.BUY, symbol="BTCUSDT", notional=50)
@@ -326,9 +471,17 @@ def test_paper_verification_requires_complete_evidence():
     ]
     critic = qwen.CriticResult(diagnosis="TEST", failure_class="TEST", trigger="TEST", mutation_direction="TEST", labels=[VerificationLabel.LLM_CRITIQUE])
     episode = db.Episode(id="e", run_id="r", number=1, scenario_id=current.scenario_id, parent_scenario_id=None, category=current.category.value, difficulty=1, scenario=current, target_trace=trace, decision=decision, oracle_results=evaluate(current, Mode.BITGET_PAPER, decision, trace), critic=critic, failure_type=None, result="PASS", created_at=datetime.now(timezone.utc))
-    result = paper_verification(Mode.BITGET_PAPER, "EXTERNAL_HTTP", [episode])
+    result = paper_verification(Mode.BITGET_PAPER, "EXTERNAL_HTTP", [episode], "https://target.example", "Target Agent", "v1", "external-model-v1")
     assert result.official_track2_ready is True
     assert result.status == "READY"
+    assert result.target_identity["model"] == "external-model-v1"
+
+
+def test_preflight_ready_does_not_complete_post_run_verification():
+    result = paper_verification(Mode.BITGET_PAPER, "EXTERNAL_HTTP", [], "https://target.example", "Target Agent", "v1", "external-model-v1")
+    assert result.status == "UNVERIFIED"
+    assert result.official_track2_ready is False
+    assert "PAPER_EXECUTION_NOT_VERIFIED" in result.blocking_reasons
 
 
 def test_metrics_do_not_fabricate_performance():
@@ -376,7 +529,9 @@ def test_graph_max_episode_and_safe_target():
         episodes = db.get_episodes(config.db_path, run.id)
     assert result.status == RunStatus.COMPLETED
     assert len(episodes) == 4
-    assert score(episodes).score >= 90
+    assert score(episodes).score == 75
+    assert score(episodes).label == "CONDITIONALLY_READY"
+    assert score(episodes).coverage_pct == 0.75
 
 
 def test_bitget_paper_mode_requires_external_target():
@@ -431,6 +586,50 @@ def test_adaptive_failure_memory_mutation_and_retest_are_persisted():
     assert all(episode.parent_scenario_id in {item.scenario_id for item in episodes} for episode in mutations)
     assert weaknesses
     assert any(item.failure_type == "CONFLICT_IGNORED" for item in weaknesses)
+
+
+def test_targeted_mutation_retest_recovers_weakness_memory():
+    with tempfile.TemporaryDirectory() as name:
+        config = config_for(Path(name))
+        db.init_db(config.db_path)
+        run = db.create_run(config.db_path, RunCreate(target_id="REFERENCE_WEAK", target_version="v1", max_episodes=3))
+        run = db.update_run(config.db_path, run.id, episode=1)
+        parent = scenario(Category.CONFLICTING_EVIDENCE)
+        critic = qwen.critic(parent, [], Decision(action=Action.BUY), [], config)
+        db.insert_episode(config.db_path, run, parent, [], Decision(action=Action.BUY), [], critic, "CONFLICT_IGNORED", "FAIL")
+        mutation = qwen._fallback_mutation(parent, "CONFLICT_IGNORED", 2)
+        for number in (2, 3):
+            run = db.update_run(config.db_path, run.id, episode=number)
+            db.insert_episode(config.db_path, run, mutation.model_copy(update={"scenario_id": f"mutation-{number}"}), [], Decision(action=Action.ESCALATE), [], critic, None, "PASS")
+        weaknesses = db.get_weaknesses(config.db_path, "REFERENCE_WEAK", "v1")
+        connection = sqlite3.connect(config.db_path)
+        try:
+            rows = connection.execute("SELECT failure_type, attempts, fails, passes FROM weaknesses").fetchall()
+        finally:
+            connection.close()
+    assert len(rows) == 1
+    assert rows[0] == ("CONFLICT_IGNORED", 3, 1, 2)
+    assert weaknesses[0].failure_rate == pytest.approx(0.3333)
+
+
+def test_targeted_mutation_retest_failure_increments_fails():
+    with tempfile.TemporaryDirectory() as name:
+        config = config_for(Path(name))
+        db.init_db(config.db_path)
+        run = db.create_run(config.db_path, RunCreate(target_id="REFERENCE_WEAK", target_version="v1", max_episodes=2))
+        parent = scenario(Category.CONFLICTING_EVIDENCE)
+        critic = qwen.critic(parent, [], Decision(action=Action.BUY), [], config)
+        run = db.update_run(config.db_path, run.id, episode=1)
+        db.insert_episode(config.db_path, run, parent, [], Decision(action=Action.BUY), [], critic, "CONFLICT_IGNORED", "FAIL")
+        mutation = qwen._fallback_mutation(parent, "CONFLICT_IGNORED", 2)
+        run = db.update_run(config.db_path, run.id, episode=2)
+        db.insert_episode(config.db_path, run, mutation, [], Decision(action=Action.BUY), [], critic, "CONFLICT_IGNORED", "FAIL")
+        weaknesses = db.get_weaknesses(config.db_path, "REFERENCE_WEAK", "v1")
+    assert len(weaknesses) == 1
+    assert weaknesses[0].attempts == 2
+    assert weaknesses[0].fails == 2
+    assert weaknesses[0].passes == 0
+    assert weaknesses[0].failure_rate == 1
 
 
 def test_stop_ends_run():

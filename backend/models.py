@@ -172,6 +172,8 @@ class CriticResult(StrictModel):
 class RunCreate(StrictModel):
     target_id: str = Field(min_length=1, max_length=100)
     target_version: str = Field(default="demo", min_length=1, max_length=40)
+    target_name: str | None = Field(default=None, max_length=100)
+    target_model: str | None = Field(default=None, max_length=100)
     target_url: str | None = Field(default=None, max_length=500)
     target_token: str | None = Field(default=None, max_length=500)
     mode: Mode = Mode.SYNTHETIC
@@ -184,6 +186,8 @@ class RunCreate(StrictModel):
             raise ValueError("BITGET_PAPER_EXTERNAL_TARGET_REQUIRED")
         if self.mode == Mode.BITGET_PAPER and not self.target_url:
             raise ValueError("TARGET_URL_REQUIRED")
+        if self.mode == Mode.BITGET_PAPER and (not self.target_name or not self.target_model):
+            raise ValueError("TARGET_IDENTITY_REQUIRED")
         return self
 
 
@@ -191,6 +195,8 @@ class Run(StrictModel):
     id: str
     target_id: str
     target_version: str
+    target_name: str | None = None
+    target_model: str | None = None
     target_url: str | None = None
     mode: Mode
     status: RunStatus
@@ -220,6 +226,9 @@ class Scorecard(StrictModel):
     label: str
     breakdown: ScoreBreakdown
     measured: dict[str, dict[str, int]] = Field(default_factory=dict)
+    measured_weight: int = Field(default=0, ge=0, le=100)
+    possible_weight: int = Field(default=100, ge=0, le=100)
+    coverage_pct: float = Field(default=0, ge=0, le=1)
     primary_weakness: str | None = None
     labels: list[VerificationLabel] = Field(default_factory=lambda: [VerificationLabel.DETERMINISTIC_ORACLE], max_length=2)
 
@@ -228,6 +237,7 @@ class VerificationSummary(StrictModel):
     status: Literal["NOT_APPLICABLE", "UNVERIFIED", "READY"]
     official_track2_ready: bool
     evidence: dict[str, bool] = Field(default_factory=dict)
+    target_identity: dict[str, str | None] = Field(default_factory=dict)
     blocking_reasons: list[str] = Field(default_factory=list, max_length=20)
 
 

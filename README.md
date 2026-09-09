@@ -49,7 +49,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`, select a target, choose `SYNTHETIC` or `BITGET_PAPER`, and start an evaluation. For Track 2, use `EXTERNAL_HTTP`, provide the target URL, configure `BITGET_MODE=paper`, run `GET /verification/preflight?target_url=...`, then inspect `/runs/{id}/verification`, `/runs/{id}/metrics`, and `/runs/{id}/events`.
+Open `http://localhost:5173`, select a target, choose `SYNTHETIC` or `BITGET_PAPER`, and start an evaluation. For Track 2, use `EXTERNAL_HTTP`, provide the target URL, declared target name, and declared target model, configure `BITGET_MODE=paper`, run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`, then inspect `/runs/{id}/verification`, `/runs/{id}/metrics`, and `/runs/{id}/events`.
 
 ## 9. Verification
 

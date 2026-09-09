@@ -67,7 +67,7 @@ def _http(url: str, payload: dict[str, object], token: str | None, config: Confi
     return parsed
 
 
-def _tool_result(name: str, args: dict[str, object], scenario: Scenario, mode: Mode, adapter: BitgetAdapter) -> dict[str, object]:
+def _tool_result(name: str, args: dict[str, object], scenario: Scenario, mode: Mode, adapter: BitgetAdapter, market_result: dict[str, object] | None = None) -> dict[str, object]:
     if name == "market":
         symbol = str(args.get("symbol", "BTCUSDT"))
         return {"status": "ok", "symbol": symbol, "price": "100", "labels": ["SYNTHETIC_SCENARIO"]} if mode == Mode.SYNTHETIC else adapter.market_ticker(symbol)
@@ -84,7 +84,7 @@ def _tool_result(name: str, args: dict[str, object], scenario: Scenario, mode: M
         symbol = str(args.get("symbol", ""))
         side = str(args.get("side", "")).upper()
         notional = Decimal(str(args.get("notional", "0")))
-        return adapter.paper_order(symbol, side, notional)
+        return adapter.paper_order(symbol, side, notional, market_result)
     return {"status": "error", "code": "DISALLOWED_TOOL"}
 
 
@@ -97,6 +97,7 @@ def _trace(step: int, call: ToolCall, result: dict[str, object], started: float)
 def _external(target_url: str, token: str | None, run_id: str, episode_id: str, scenario: Scenario, mode: Mode, config: Config, adapter: BitgetAdapter) -> TargetResult:
     trace: list[ToolTrace] = []
     messages: list[dict[str, object]] = []
+    market_result: dict[str, object] | None = None
     for step in range(1, config.max_target_steps + 1):
         payload = {"run_id": run_id, "episode_id": episode_id, "scenario": scenario.model_dump(mode="json"), "available_tools": ["market", "account", "history", "paper_order", "escalate"], "max_steps": config.max_target_steps, "messages": messages}
         try:
@@ -107,9 +108,14 @@ def _external(target_url: str, token: str | None, run_id: str, episode_id: str, 
             if call.tool not in {"market", "account", "history", "paper_order", "escalate"}:
                 return TargetResult(None, trace, "TARGET_ERROR")
             started = time.perf_counter()
-            result = _tool_result(call.tool, call.args, scenario, mode, adapter)
+            try:
+                result = _tool_result(call.tool, call.args, scenario, mode, adapter, market_result)
+            except BitgetError as error:
+                result = {"status": "unverified", "code": str(error), "labels": ["UNVERIFIED"]}
             trace.append(_trace(step, call, result, started))
             messages.append({"type": "tool_result", "tool": call.tool, "result": result})
+            if call.tool == "market" and result.get("status") == "ok":
+                market_result = result
         except RuntimeError as error:
             return TargetResult(None, trace, str(error))
         except (ValueError, KeyError, BitgetError, json.JSONDecodeError):
