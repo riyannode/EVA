@@ -1,0 +1,22 @@
+[project]
+name = "eva-backend"
+version = "0.1.0"
+description = "EVA trading-agent evaluation backend"
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi==0.141.1",
+  "langgraph==1.2.11",
+  "langgraph-checkpoint-sqlite==3.1.1",
+  "openai==3.9.0",
+  "pydantic==2.13.5",
+  "uvicorn==0.35.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4,<10",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["test_eva.py"]
