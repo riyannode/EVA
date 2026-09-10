@@ -176,7 +176,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; font-size: 10
 .error { color: #f0b5a6; border: 1px solid #856154; padding: 12px; font-size: 12px; line-height: 1.6; margin: 10px 0 16px; }
 .mobile-only { display: none; }
 .analysis-page { padding-bottom: 8px; }
-.analysis-heading { padding-bottom: 22px; }
+.analysis-heading { padding: 24px 0 22px; }
 .analysis-heading h1 { color: #e2e8dc; }
 .analysis-run-selector { display: grid; grid-template-columns: auto minmax(180px, 260px); align-items: center; gap: 10px; color: var(--muted); font-size: 11px; }
 .analysis-run-selector select { border: 1px solid #47554e; background: #222d2a; color: #d2dbc9; padding: 10px 11px; min-width: 0; }
@@ -375,7 +375,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; font-size: 10
   .verification { grid-template-columns: 1fr; padding: 18px; }
   footer { flex-direction: column; gap: 10px; line-height: 1.6; font-size: 9px; }
   .run-dialog { padding: 22px; }
-  .analysis-heading { align-items: start; }
+  .analysis-heading { align-items: start; padding-top: 18px; }
   .analysis-run-selector { grid-template-columns: 1fr; width: 100%; gap: 6px; }
   .analysis-run-selector select { width: 100%; }
   .analysis-runbar { grid-template-columns: 1fr 1fr; }
