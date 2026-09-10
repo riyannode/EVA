@@ -4,8 +4,10 @@ import { createRun, eventUrl, getEpisodes, getRun, getRuns, getScore, getVerific
   getMetrics, type Episode, type EvaluationMetrics, type GraphEvent, type Run, type RunInput, type Scorecard, type Verification, type Weakness } from "./api";
 import { appendEvent, isActive, parseEvent, readable, stageForEvent, stationForStage, stations, stages, type StationId } from "./graph-view";
 import Analysis from "./analysis";
+import { displayLabel, runLabel } from "./presentation";
 
 const Office = lazy(() => import("./office"));
+const NightBackground = lazy(() => import("./night-background"));
 const tabs = ["Activity"] as const;
 const initialForm: RunInput = { target_id: "REFERENCE_SAFE", target_version: "demo", mode: "SYNTHETIC", max_episodes: 20, difficulty: 1 };
 
@@ -152,29 +154,38 @@ export default function App() {
   const failures = episodes.filter(episode => episode.result === "FAIL").length;
   const measured = episodes.length > 0;
   return <>
+    <Suspense fallback={<div className="night-background" aria-hidden="true" />}><NightBackground motion={motion} /></Suspense>
+    <button className="background-motion" onClick={() => setPaused(value => !value)} disabled={reduced} aria-pressed={!motion}>{reduced ? "Reduced motion" : motion ? "Pause background" : "Resume background"}</button>
     <a className="skip-link" href="#main">Skip to workspace</a>
     <header className="app-header">
-      <a className="brand" href="#main" aria-label="EVA workspace"><span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span><span>EVA</span><small>agent lab</small></a>
+      <a className="brand" href="#main" aria-label="EVA workspace"><span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span><span>EVA</span></a>
       <nav aria-label="Workspace navigation"><button className={view === "observatory" ? "nav-current" : ""} onClick={() => setView("observatory")}>Observatory</button><button className={view === "analysis" ? "nav-current" : ""} onClick={() => setView("analysis")}>Analysis</button></nav>
       <div className={`connection ${connection}`} role="status"><i />{connection === "online" ? "API connected" : connection === "connecting" ? "Connecting" : "API offline"}</div>
     </header>
-    <main id="main">
+    <main id="main" className={view === "observatory" ? "observatory-layout" : undefined}>
       {view === "analysis" ? <Analysis runs={runs} runId={runId} run={run} episodes={episodes} score={score} metrics={metrics} weaknesses={weaknesses} verification={verification} onRunChange={setRunId} /> : <>
       <section className="page-heading">
-        <div><div className="breadcrumb">Workspace <span>/</span> Observatory</div><h1>A little world.<br className="mobile-only" /> Serious evaluation.</h1><p>Watch the graph work. Follow the evidence.</p></div>
+        <div><div className="breadcrumb">Workspace <span>/</span> Observatory</div><h1>Watch your agent being tested.</h1><p>Start an evaluation, follow each step, then review the results in Analysis.</p></div>
         <button className="button primary" onClick={() => { setError(""); setConfigOpen(true); dialog.current?.showModal(); }}><span aria-hidden="true">+</span> New evaluation</button>
       </section>
 
+      <div className="observatory-primary">
       {connection === "offline" && <div className="connection-notice"><span><strong>Backend disconnected.</strong> The office is idle. Run data will appear when the API is available.</span><button onClick={() => setRetry(value => value + 1)}>Reconnect</button></div>}
       {error && !configOpen && <p className="error" role="alert">{error}</p>}
 
+      <section className="evaluation-context panel" aria-label="Selected evaluation">
+        <label><span>Evaluation to watch</span><select value={runId ?? ""} onChange={event => setRunId(event.target.value || null)}><option value="">Select an evaluation</option>{runs.map(value => <option key={value.id} value={value.id}>{runLabel(value)}</option>)}</select></label>
+        <div><span>Test environment</span><strong>{run ? displayLabel(run.mode) : "No evaluation selected"}</strong></div>
+        <div><span>Progress</span><strong>{run ? `${episodes.length} / ${run.max_episodes} test cases · ${displayLabel(run.status)}` : "Create an evaluation to begin"}</strong></div>
+        <button className="button" disabled={!run} onClick={() => setView("analysis")}>Review results</button>
+      </section>
       <div className="workspace">
         <section className="observatory panel" aria-labelledby="office-title">
-          <div className="panel-heading"><h2 id="office-title"><span className="square-indicator" />The observatory</h2><div className="scene-controls"><span className="idle-label">{active ? `${stationForStage(stage)} active` : "Office on standby"}</span><button className="motion-button" aria-pressed={paused || reduced} onClick={() => setPaused(value => !value)} disabled={reduced}>{reduced ? "Reduced motion" : motion ? "Pause motion" : "Resume motion"}</button></div></div>
+          <div className="panel-heading"><h2 id="office-title"><span className="square-indicator" />Observatory</h2><div className="scene-controls"><span className="idle-label">{active ? `${stationForStage(stage)} active` : "Office on standby"}</span><button className="motion-button" aria-pressed={paused || reduced} onClick={() => setPaused(value => !value)} disabled={reduced}>{reduced ? "Reduced motion" : motion ? "Pause motion" : "Resume motion"}</button></div></div>
           <div className="scene-wrap">
-            <div className="scene-caption"><span>Evaluation floor</span><small>01 / EVA headquarters</small></div>
-            <Suspense fallback={<div className="scene-loading">Building the office…</div>}><Office active={active} selected={selected} eventId={events.at(-1)?.id ?? 0} motion={motion} onSelect={setSelected} /></Suspense>
-            <div className="scene-bottom"><span><i className="mini-dot" />{run ? readable(run.mode) : "No run selected"}</span><span>Select a station to inspect</span></div>
+            <div className="scene-caption"><span>Evaluation floor</span><small>Agents hand off work as graph events arrive</small></div>
+            <Suspense fallback={<div className="scene-loading">Building the office…</div>}><Office key={runId ?? "empty"} active={active} selected={selected} events={events} running={connection === "online" && stream === "connected" && isActive(run)} motion={motion} onSelect={setSelected} /></Suspense>
+            <div className="scene-bottom"><span><i className="mini-dot" />{run ? readable(run.mode) : "No run selected"}</span></div>
           </div>
           <div className="graph-strip" aria-label="LangGraph stages">{stages.map((value, index) => <div key={value} className={stage === value && run ? "current" : ""} title={value}><span>{String(index + 1).padStart(2, "0")}</span><b>{({ CHOOSE_SCENARIO: "Scenario", RUN_TARGET: "Target", RUN_ORACLES: "Oracles", SAVE_MEMORY: "Memory", LOAD_RUN: "Load" } as Record<string, string>)[value] ?? readable(value)}</b></div>)}</div>
         </section>
@@ -191,18 +202,19 @@ export default function App() {
 
       <section className="telemetry" aria-label="Run summary">
         <div><span>Readiness score</span><strong>{measured && score ? score.score : "—"}<small>/ 100</small></strong><p>{measured && score ? readable(score.label) : "Not measured yet"}</p></div>
-        <div><span>Episodes evaluated</span><strong>{run ? episodes.length.toString().padStart(2, "0") : "—"}<small>{run ? `/ ${run.max_episodes}` : "/ —"}</small></strong><p>{run ? readable(run.status) : "Waiting for an evaluation"}</p></div>
-        <div><span>Difficulty reached</span><strong>{run ? String(run.difficulty).padStart(2, "0") : "—"}<small>/ 05</small></strong><p>Deterministic progression</p></div>
+        <div><span>Test cases evaluated</span><strong>{run ? episodes.length.toString().padStart(2, "0") : "—"}<small>{run ? `/ ${run.max_episodes}` : "/ —"}</small></strong><p>{run ? readable(run.status) : "Waiting for an evaluation"}</p></div>
+        <div><span>Difficulty reached</span><strong>{run ? String(run.difficulty).padStart(2, "0") : "—"}<small>/ 05</small></strong><p>Difficulty increases after repeated passes</p></div>
         <div><span>Observed failures</span><strong className={failures > 0 ? "failure-number" : ""}>{measured ? String(failures).padStart(2, "0") : "—"}</strong><p>{measured ? `${Math.round(failures / episodes.length * 100)}% of evaluated episodes` : "No results to grade"}</p></div>
       </section>
 
+      </div>
       <section className="inspector panel" ref={inspector} aria-label="Run evidence">
         <div className="inspector-toolbar"><div className="tabs" role="tablist" aria-label="Evidence view">{tabs.map((value, index) => <button key={value} id={`tab-${value.replaceAll(" ", "-")}`} role="tab" tabIndex={tab === value ? 0 : -1} aria-selected={tab === value} aria-controls="evidence-panel" onClick={() => setTab(value)} onKeyDown={event => {
           const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
           if (next === null) return;
           event.preventDefault(); setTab(tabs[next]); document.getElementById(`tab-${tabs[next].replaceAll(" ", "-")}`)?.focus();
         }}>{value}{value === "Activity" && <span>{events.length}</span>}</button>)}</div>
-          <label className="run-select"><span className="sr-only">Select evaluation run</span><select value={runId ?? ""} onChange={event => setRunId(event.target.value || null)}><option value="">Select a run</option>{runs.map(value => <option key={value.id} value={value.id}>{value.target_name || value.target_id} · {value.id.slice(0, 8)}</option>)}</select></label>
+          <label className="run-select"><span className="sr-only">Select evaluation run</span><select value={runId ?? ""} onChange={event => setRunId(event.target.value || null)}><option value="">Select a run</option>{runs.map(value => <option key={value.id} value={value.id}>{runLabel(value)}</option>)}</select></label>
           {isActive(run) && <button className="button stop-button" disabled={busy} onClick={() => void stop()}>Stop run</button>}
         </div>
         <div id="evidence-panel" role="tabpanel" aria-labelledby={`tab-${tab.replaceAll(" ", "-")}`}>
@@ -213,13 +225,13 @@ export default function App() {
     </main>
 
     <dialog ref={dialog} className="run-dialog" aria-label="New evaluation configuration" onClose={() => { setError(""); setConfigOpen(false); }}>
-      <form onSubmit={start}><div className="dialog-heading"><div><h2>New evaluation</h2><p>Give the crew a target to test.</p></div><button type="button" className="close-button" aria-label="Close configuration" onClick={() => dialog.current?.close()}>×</button></div>
-        <label>Evaluation mode<select value={form.mode} onChange={event => setForm(previous => ({ ...previous, mode: event.target.value as Run["mode"], ...(event.target.value === "BITGET_PAPER" ? { target_id: "EXTERNAL_HTTP" } : {}) }))}><option value="SYNTHETIC">Synthetic benchmark</option><option value="BITGET_PAPER">Bitget paper benchmark</option></select></label>
-        <label>Target agent<select value={form.target_id} onChange={event => setForm(previous => ({ ...previous, target_id: event.target.value }))}><option value="REFERENCE_SAFE" disabled={form.mode === "BITGET_PAPER"}>Reference safe · deterministic fixture</option><option value="REFERENCE_WEAK" disabled={form.mode === "BITGET_PAPER"}>Reference weak · deterministic fixture</option><option value="EXTERNAL_HTTP">External HTTP agent</option></select></label>
-        {form.target_id === "EXTERNAL_HTTP" && <><label>Target URL<input type="url" required value={form.target_url ?? ""} onChange={event => setForm(previous => ({ ...previous, target_url: event.target.value }))} placeholder="http://127.0.0.1:9000/agent" /></label><div className="form-grid"><label>Agent name<input required value={form.target_name ?? ""} maxLength={100} onChange={event => setForm(previous => ({ ...previous, target_name: event.target.value }))} /></label><label>Declared model<input required value={form.target_model ?? ""} maxLength={100} onChange={event => setForm(previous => ({ ...previous, target_model: event.target.value }))} /></label></div><label>Bearer token <small>optional · not stored in the browser</small><input type="password" autoComplete="off" value={form.target_token ?? ""} maxLength={500} onChange={event => setForm(previous => ({ ...previous, target_token: event.target.value }))} /></label></>}
-        <div className="form-grid"><label>Version<input required maxLength={40} value={form.target_version} onChange={event => setForm(previous => ({ ...previous, target_version: event.target.value }))} /></label><label>Episode budget<input type="number" min={1} max={100} required value={form.max_episodes} onChange={event => setForm(previous => ({ ...previous, max_episodes: Number(event.target.value) }))} /></label></div>
+      <form onSubmit={start}><div className="dialog-heading"><div><h2>New evaluation</h2><p>Choose the agent and the tests EVA will run.</p></div><button type="button" className="close-button" aria-label="Close configuration" onClick={() => dialog.current?.close()}>×</button></div>
+        <label>Evaluation mode<select value={form.mode} onChange={event => setForm(previous => ({ ...previous, mode: event.target.value as Run["mode"], ...(event.target.value === "BITGET_PAPER" ? { target_id: "EXTERNAL_HTTP" } : {}) }))}><option value="SYNTHETIC">Synthetic scenarios (no exchange orders)</option><option value="BITGET_PAPER">Bitget demo account (paper orders)</option></select></label>
+        <label>Target agent<select value={form.target_id} onChange={event => setForm(previous => ({ ...previous, target_id: event.target.value }))}><option value="REFERENCE_SAFE" disabled={form.mode === "BITGET_PAPER"}>Safety-focused reference agent</option><option value="REFERENCE_WEAK" disabled={form.mode === "BITGET_PAPER"}>Weak reference agent</option><option value="EXTERNAL_HTTP">Your external trading agent</option></select></label>
+        {form.target_id === "EXTERNAL_HTTP" && <><label>Agent endpoint URL<input type="url" required value={form.target_url ?? ""} onChange={event => setForm(previous => ({ ...previous, target_url: event.target.value }))} placeholder="http://127.0.0.1:9000/agent" /></label><div className="form-grid"><label>Agent name<input required value={form.target_name ?? ""} maxLength={100} onChange={event => setForm(previous => ({ ...previous, target_name: event.target.value }))} /></label><label>Agent model name<input required value={form.target_model ?? ""} maxLength={100} onChange={event => setForm(previous => ({ ...previous, target_model: event.target.value }))} /></label></div><label>Bearer token <small>optional · not stored in the browser</small><input type="password" autoComplete="off" value={form.target_token ?? ""} maxLength={500} onChange={event => setForm(previous => ({ ...previous, target_token: event.target.value }))} /></label></>}
+        <div className="form-grid"><label>Agent version<input required maxLength={40} value={form.target_version} onChange={event => setForm(previous => ({ ...previous, target_version: event.target.value }))} /></label><label>Maximum test cases<input type="number" min={1} max={100} required value={form.max_episodes} onChange={event => setForm(previous => ({ ...previous, max_episodes: Number(event.target.value) }))} /></label></div>
         <label>Starting difficulty<select value={form.difficulty} onChange={event => setForm(previous => ({ ...previous, difficulty: Number(event.target.value) }))}>{[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>Level {value}</option>)}</select></label>
-        <p className="form-note">{form.mode === "BITGET_PAPER" ? "Paper mode requires configured Bitget access and an external agent. Model identity is target-declared, not proof of execution." : "Reference agents are deterministic fixtures. They do not verify an external LLM or Bitget paper execution."}</p>
+        <p className="form-note">{form.mode === "BITGET_PAPER" ? "EVA tests your external agent using Bitget demo funds. Enter the agent endpoint and the model it declares." : "Reference agents are built-in test examples. Choose an external agent to evaluate your own model. Synthetic tests do not place exchange orders."}</p>
         {error && <p className="error" role="alert">{error}</p>}
         <button className="button primary submit-button" disabled={busy}>{busy ? "Creating run…" : "Start evaluation"}</button>
       </form>

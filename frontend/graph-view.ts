@@ -25,6 +25,14 @@ export function stationForStage(stage: string | null): StationId | null {
   return stations.find(station => station.stages.some(item => item === stage))?.id ?? null;
 }
 
+export function eventStops(events: GraphEvent[], afterId: number): { id: number; station: StationId }[] {
+  const unique = new Map(events.filter(event => event.id > afterId).map(event => [event.id, event]));
+  return [...unique.values()].sort((a, b) => a.id - b.id).flatMap(event => {
+    const station = stationForStage(stageForEvent(event.type));
+    return station ? [{ id: event.id, station }] : [];
+  });
+}
+
 export function parseEvent(raw: string, runId: string): GraphEvent | null {
   try {
     const value: unknown = JSON.parse(raw);
