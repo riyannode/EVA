@@ -1,11 +1,12 @@
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { animate } from "animejs";
 import { createRun, eventUrl, getEpisodes, getRun, getRuns, getScore, getVerification, getWeaknesses, stopRun,
-  type Episode, type GraphEvent, type Run, type RunInput, type Scorecard, type Verification, type Weakness } from "./api";
+  getMetrics, type Episode, type EvaluationMetrics, type GraphEvent, type Run, type RunInput, type Scorecard, type Verification, type Weakness } from "./api";
 import { appendEvent, isActive, parseEvent, readable, stageForEvent, stationForStage, stations, stages, type StationId } from "./graph-view";
+import Analysis from "./analysis";
 
 const Office = lazy(() => import("./office"));
-const tabs = ["Activity", "Episodes", "Weakness memory", "Verification"] as const;
+const tabs = ["Activity"] as const;
 const initialForm: RunInput = { target_id: "REFERENCE_SAFE", target_version: "demo", mode: "SYNTHETIC", max_episodes: 20, difficulty: 1 };
 
 function Avatar({ index, large = false }: { index: number; large?: boolean }) {
@@ -26,6 +27,7 @@ export default function App() {
   const [score, setScore] = useState<Scorecard | null>(null);
   const [weaknesses, setWeaknesses] = useState<Weakness[]>([]);
   const [verification, setVerification] = useState<Verification | null>(null);
+  const [metrics, setMetrics] = useState<EvaluationMetrics | null>(null);
   const [events, setEvents] = useState<GraphEvent[]>([]);
   const [stage, setStage] = useState<string | null>(null);
   const [selected, setSelected] = useState<StationId>("scenario");
@@ -37,6 +39,7 @@ export default function App() {
   const [form, setForm] = useState<RunInput>(initialForm);
   const [busy, setBusy] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [view, setView] = useState<"observatory" | "analysis">("observatory");
   const [paused, setPaused] = useState(false);
   const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -67,7 +70,7 @@ export default function App() {
   }, [retry]);
 
   useEffect(() => {
-    setRun(null); setEpisodes([]); setScore(null); setWeaknesses([]); setVerification(null); setEvents([]); setStage(null);
+    setRun(null); setEpisodes([]); setScore(null); setMetrics(null); setWeaknesses([]); setVerification(null); setEvents([]); setStage(null);
     if (!runId) return;
     let disposed = false;
     let terminal = false;
@@ -95,11 +98,11 @@ export default function App() {
     };
     async function refresh() {
       try {
-        const [nextRun, nextEpisodes, nextScore, nextWeaknesses, nextVerification] = await Promise.all([
-          getRun(runId!), getEpisodes(runId!), getScore(runId!), getWeaknesses(runId!), getVerification(runId!),
+        const [nextRun, nextEpisodes, nextScore, nextMetrics, nextWeaknesses, nextVerification] = await Promise.all([
+          getRun(runId!), getEpisodes(runId!), getScore(runId!), getMetrics(runId!), getWeaknesses(runId!), getVerification(runId!),
         ]);
         if (disposed) return;
-        setRun(nextRun); setEpisodes(nextEpisodes); setScore(nextScore); setWeaknesses(nextWeaknesses); setVerification(nextVerification);
+        setRun(nextRun); setEpisodes(nextEpisodes); setScore(nextScore); setMetrics(nextMetrics); setWeaknesses(nextWeaknesses); setVerification(nextVerification);
         setStage(nextRun.current_stage); setConnection("online");
         setRuns(previous => previous.map(value => value.id === nextRun.id ? nextRun : value));
         terminal = !isActive(nextRun);
@@ -152,10 +155,11 @@ export default function App() {
     <a className="skip-link" href="#main">Skip to workspace</a>
     <header className="app-header">
       <a className="brand" href="#main" aria-label="EVA workspace"><span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span><span>EVA</span><small>agent lab</small></a>
-      <nav aria-label="Workspace navigation"><a className="nav-current" href="#main">Observatory</a><button onClick={() => navigate("Episodes")}>Episodes</button><button onClick={() => navigate("Weakness memory")}>Memory</button></nav>
+      <nav aria-label="Workspace navigation"><button className={view === "observatory" ? "nav-current" : ""} onClick={() => setView("observatory")}>Observatory</button><button className={view === "analysis" ? "nav-current" : ""} onClick={() => setView("analysis")}>Analysis</button></nav>
       <div className={`connection ${connection}`} role="status"><i />{connection === "online" ? "API connected" : connection === "connecting" ? "Connecting" : "API offline"}</div>
     </header>
     <main id="main">
+      {view === "analysis" ? <Analysis runs={runs} runId={runId} run={run} episodes={episodes} score={score} metrics={metrics} weaknesses={weaknesses} verification={verification} onRunChange={setRunId} /> : <>
       <section className="page-heading">
         <div><div className="breadcrumb">Workspace <span>/</span> Observatory</div><h1>A little world.<br className="mobile-only" /> Serious evaluation.</h1><p>Watch the graph work. Follow the evidence.</p></div>
         <button className="button primary" onClick={() => { setError(""); setConfigOpen(true); dialog.current?.showModal(); }}><span aria-hidden="true">+</span> New evaluation</button>
@@ -203,12 +207,9 @@ export default function App() {
         </div>
         <div id="evidence-panel" role="tabpanel" aria-labelledby={`tab-${tab.replaceAll(" ", "-")}`}>
           {tab === "Activity" && <><div className="feed-heading"><span>Graph event stream</span><span>{run ? stream === "connected" ? "SSE connected" : stream === "closed" ? "Stored run events" : "Stream reconnecting" : "Waiting for a run"}</span></div>{events.length ? <ol className="event-list">{[...events].reverse().map(event => <li key={event.id}><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString("en-GB")}</time><span className="event-type">{event.type}</span><details><summary>Inspect payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol> : <Empty title="A quiet office, for now.">Start an evaluation to see scenarios, decisions and oracle results arrive here.</Empty>}</>}
-          {tab === "Episodes" && (episodes.length ? <div className="table-scroll"><table><thead><tr><th>Episode</th><th>Scenario</th><th>Decision</th><th>Result</th><th>Evidence</th></tr></thead><tbody>{episodes.map(episode => <tr key={episode.id}><td>{String(episode.number).padStart(2, "0")}</td><td><strong>{episode.scenario.title}</strong><small>{readable(episode.category)} · difficulty {episode.difficulty}</small></td><td>{episode.decision?.action ?? "No decision"}<small>{episode.decision?.symbol ?? ""}</small></td><td><span className={`result ${episode.result === "PASS" ? "pass" : "fail"}`}>{episode.result}</span></td><td><details><summary>Oracle results</summary>{episode.oracle_results.map((oracle, index) => <p key={index}>{oracle.name}: {oracle.status} · {oracle.code}</p>)}</details></td></tr>)}</tbody></table></div> : <Empty title="No episodes recorded.">Episode results appear only after the backend saves them.</Empty>)}
-          {tab === "Weakness memory" && (weaknesses.length ? <div className="table-scroll"><table><thead><tr><th>Weakness</th><th>Attempts</th><th>Failures</th><th>Recovery passes</th><th>Failure rate</th></tr></thead><tbody>{weaknesses.map(value => <tr key={`${value.category}-${value.failure_type}`}><td><strong>{readable(value.failure_type)}</strong><small>{readable(value.category)}</small></td><td>{value.attempts}</td><td>{value.fails}</td><td>{value.passes}</td><td>{Math.round(value.failure_rate * 100)}%</td></tr>)}</tbody></table></div> : <Empty title="No weakness records yet.">A failed episode starts a memory. Targeted retests measure recovery.</Empty>)}
-          {tab === "Verification" && (run && verification ? <div className="verification"><div><h3>{verification.status === "NOT_APPLICABLE" ? "Synthetic fixture run" : verification.official_track2_ready ? "Paper evidence accepted" : "Paper evidence unverified"}</h3><p>{run.mode === "SYNTHETIC" ? "Local fixture results are not official paper execution evidence." : "Readiness and paper execution acceptance are separate."}</p><dl><div><dt>Target</dt><dd>{run.target_name || run.target_id}</dd></div><div><dt>Declared model</dt><dd>{run.target_model || "Not declared"}</dd></div><div><dt>Version</dt><dd>{run.target_version}</dd></div><div><dt>Measured coverage</dt><dd>{score ? `${Math.round(score.coverage_pct * 100)}%` : "Unmeasured"}</dd></div></dl>{verification.blocking_reasons?.map(reason => <code key={reason}>{reason}</code>)}</div><div className="score-breakdown"><h3>Readiness breakdown</h3>{score && Object.entries(score.breakdown).map(([name, value]) => <div key={name}><span>{readable(name)}</span><strong>{value}</strong></div>)}</div></div> : <Empty title="Evidence before confidence.">Select a run to inspect its acceptance status and measured coverage.</Empty>)}
         </div>
       </section>
-      <footer><span>EVA <span className="footer-divider">/</span> Adaptive trading-agent evaluation</span><span>Qwen creates. Deterministic code grades.</span></footer>
+      <footer><span>EVA <span className="footer-divider">/</span> Adaptive trading-agent evaluation</span><span>Qwen creates. Deterministic code grades.</span></footer></>}
     </main>
 
     <dialog ref={dialog} className="run-dialog" aria-label="New evaluation configuration" onClose={() => { setError(""); setConfigOpen(false); }}>

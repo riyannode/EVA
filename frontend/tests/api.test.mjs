@@ -11,10 +11,11 @@ test("frontend calls only existing read, create and stop contracts", async () =>
     await api.getRun("run");
     await api.getEpisodes("run");
     await api.getScore("run");
+    await api.getMetrics("run");
     await api.getWeaknesses("run");
     await api.getVerification("run");
     await api.stopRun("run");
-    assert.deepEqual(calls.map(call => new URL(call.url).pathname), ["/runs", "/runs/run", "/runs/run/episodes", "/runs/run/score", "/runs/run/weaknesses", "/runs/run/verification", "/runs/run/stop"]);
+    assert.deepEqual(calls.map(call => new URL(call.url).pathname), ["/runs", "/runs/run", "/runs/run/episodes", "/runs/run/score", "/runs/run/metrics", "/runs/run/weaknesses", "/runs/run/verification", "/runs/run/stop"]);
     assert.equal(calls.at(-1).init.method, "POST");
     assert.equal(new URL(api.eventUrl("run")).pathname, "/runs/run/events");
   } finally { globalThis.fetch = original; }
