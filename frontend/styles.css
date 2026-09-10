@@ -203,7 +203,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; font-size: 10
 .analysis-metric > span { color: #a9b4aa; font-size: 10px; }
 .analysis-metric strong { font: 20px var(--pixel); color: #dbe6d5; overflow-wrap: anywhere; }
 .analysis-metric small { color: #98a79c; font-size: 10px; text-transform: capitalize; }
-.analysis-metric.good strong { color: var(--accent); }
+.analysis-metric.good strong, .analysis-value.good { color: var(--accent); }
 .analysis-metric.warn strong, .analysis-value.warn { color: #e7ac91; }
 .analysis-list { display: grid; grid-template-columns: 1fr 1fr; padding: 5px 20px 10px; column-gap: 30px; }
 .analysis-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: baseline; padding: 12px 0; border-bottom: 1px solid #303b36; font-size: 11px; }
@@ -320,9 +320,11 @@ footer { display: flex; justify-content: space-between; gap: 20px; font-size: 10
   .paper-summary > :last-child { grid-column: 1 / -1; border-top: 1px solid var(--line); }
 }
 @media (max-width: 600px) {
-  .app-header { height: 64px; padding-inline: 18px; gap: 0; }
+  .app-header { height: auto; min-height: 64px; padding: 14px 18px 0; gap: 0; flex-wrap: wrap; }
   .brand > span:nth-child(2) { font-size: 25px; }
-  .app-header nav { display: none; }
+  .app-header nav { display: flex; order: 3; width: 100%; height: 44px; margin-top: 10px; gap: 0; font: 10px var(--pixel); }
+  .app-header nav button { flex: 1; justify-content: center; padding: 0 8px; border: 1px solid var(--line); border-bottom-width: 2px; }
+  .app-header nav button + button { border-left: 0; }
   .connection { font-size: 10px; }
   main { padding-inline: 14px; }
   .page-heading { padding: 24px 2px; flex-wrap: wrap; align-items: start; gap: 18px; }
