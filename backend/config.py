@@ -15,7 +15,6 @@ class Config:
     db_path: Path
     checkpoint_path: Path
     bitget_mode: str
-    live_trading_enabled: bool
     bitget_executable: str
     frontend_origin: str
     demo_mode: bool
@@ -35,7 +34,7 @@ def _boolean(name: str, default: bool) -> bool:
 
 def load_config() -> Config:
     mode = os.getenv("BITGET_MODE", "read-only")
-    if mode not in {"read-only", "paper", "live"}:
+    if mode not in {"read-only", "paper"}:
         raise ConfigError("INVALID_BITGET_MODE")
     root = Path(__file__).resolve().parent
     return Config(
@@ -45,7 +44,6 @@ def load_config() -> Config:
         db_path=Path(os.getenv("EVA_DB", str(root / "eva.db"))),
         checkpoint_path=Path(os.getenv("EVA_CHECKPOINT_DB", str(root / "checkpoints.db"))),
         bitget_mode=mode,
-        live_trading_enabled=_boolean("ENABLE_LIVE_TRADING", False),
         bitget_executable=os.getenv("BITGET_EXECUTABLE", "bgc"),
         frontend_origin=os.getenv("FRONTEND_ORIGIN", "http://localhost:5173"),
         demo_mode=_boolean("DEMO_MODE", True),

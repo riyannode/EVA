@@ -16,7 +16,7 @@
 - Qwen may generate scenarios, critiques, and mutations; deterministic code owns pass/fail and readiness.
 - Bitget writes are paper-trading only and use an explicit allowlist with `shell=False`.
 - SQLite uses parameterized SQL and no ORM; `eva.db` and `checkpoints.db` are ignored.
-- No secrets, withdrawals, transfers, margin, or arbitrary shell commands. Live orders use a separate explicit execution surface.
+- No secrets, withdrawals, transfers, margin, real-money execution, or arbitrary shell commands.
 
 ## File Map
 
@@ -27,7 +27,7 @@
 - `backend/score.py`: fixed weighted readiness score and labels.
 - `backend/qwen.py`: optional OpenAI-compatible scenario, critic, and mutation calls with validation and one scenario repair retry.
 - `backend/target.py`: HTTP protocol, reference weak/safe targets, tool loop, caps, and target errors.
-- `backend/bitget.py`: fixed Bitget CLI invocation with paper and gated live adapters.
+- `backend/bitget.py`: fixed Bitget CLI invocation with paper-only write support.
 - `backend/graph.py`: one LangGraph state machine and deterministic curriculum.
 - `backend/app.py`: FastAPI endpoints and in-process run scheduling.
 - `backend/test_eva.py`: focused backend regression tests.
@@ -54,7 +54,7 @@ Implement one OpenAI-compatible client in `qwen.py`. Keep prompt name/version in
 
 ### Task 5: Target protocol and Bitget safety
 
-Implement the stateless HTTP target contract with timeout, body-size, response-shape, and step caps. Implement reference weak/safe targets and standardized tools. Implement Bitget discovery/read/paper order calls with fixed arrays, disallowed operation rejection, and paper flag enforcement. Test timeout, malformed responses, step limits, allowlists, and absence of live write commands.
+Implement the stateless HTTP target contract with timeout, body-size, response-shape, and step caps. Implement reference weak/safe targets and standardized tools. Implement Bitget discovery/read/paper order calls with fixed arrays, disallowed operation rejection, paper flag enforcement, and order-reference verification. Test timeout, malformed responses, step limits, allowlists, and absence of real-money write commands.
 
 ### Task 6: Adaptive LangGraph run
 
@@ -66,4 +66,4 @@ Build the flat Vite React console with target/version/mode/episode/difficulty co
 
 ### Task 8: Evidence and acceptance
 
-Run bounded synthetic weak and safe demos, inspect persisted SQLite records, validate `BITGET_PAPER` behavior without credentials, run backend tests, frontend build, `git diff --check`, and a source scan for secrets, forbidden directories, comments, and live-order paths. Write docs that distinguish verified, unverified, synthetic, paper, and LLM evidence. Leave all task-started processes stopped and leave the final commit step to the user.
+Run bounded synthetic weak and safe demos, inspect persisted SQLite records, validate `BITGET_PAPER` behavior without credentials, run backend tests, `git diff --check`, and a source scan for secrets, forbidden directories, comments, and real-money order paths. Write docs that distinguish verified, unverified, synthetic, paper, and LLM evidence. Leave all task-started processes stopped and leave the final commit step to the user.

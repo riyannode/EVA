@@ -10,10 +10,10 @@ from fastapi.responses import StreamingResponse
 
 import db
 import graph
-from bitget import BitgetAdapter, BitgetError
+from bitget import BitgetAdapter, BitgetError, instrument_record, paper_order_contract_ready, structured_result
 from config import Config, load_config
-from models import LiveOrder, LiveOrderDraft, LiveOrderRequest, Mode, Run, RunCreate, RunStatus, Scorecard
-from score import score
+from models import EvaluationMetrics, Mode, Policy, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
+from score import metrics, paper_verification, score
 
 
 CONFIG: Config = load_config()
@@ -55,56 +55,64 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/trading/status")
-def trading_status() -> dict[str, object]:
+@app.get("/verification/preflight")
+def verification_preflight(target_url: str | None = None, target_name: str | None = None, target_model: str | None = None) -> dict[str, object]:
+    reasons: list[str] = []
+    if CONFIG.qwen_api_key:
+        qwen_status = "CONFIGURED"
+    else:
+        qwen_status = "UNVERIFIED"
+        reasons.append("QWEN_UNAVAILABLE")
+    external_ready = bool(target_url and urlparse(target_url).scheme in {"http", "https"})
+    if not external_ready:
+        reasons.append("TARGET_URL_REQUIRED")
+    if not target_name or not target_model:
+        reasons.append("TARGET_IDENTITY_REQUIRED")
+    adapter = BitgetAdapter(CONFIG)
+    discovery = adapter.discover()
+    cli_ready = discovery.get("status") == "ok" and structured_result(discovery)
+    if discovery.get("code") == "BITGET_CLI_MISSING":
+        reasons.append("BITGET_CLI_MISSING")
+    elif not cli_ready:
+        reasons.append("BITGET_PAPER_UNAVAILABLE")
+    paper_contract = adapter.paper_order_contract() if cli_ready else None
+    paper_ready = CONFIG.bitget_mode == "paper" and paper_order_contract_ready(paper_contract)
+    if not paper_ready:
+        reasons.append("BITGET_PAPER_UNAVAILABLE")
+    symbol, market = adapter.resolve_symbol(Policy().allowed_symbols) if cli_ready else (None, None)
+    market_ready = symbol is not None and market is not None and structured_result(market)
+    instrument = adapter.instrument(symbol) if market_ready and symbol else None
+    instrument_ready = bool(symbol and instrument and structured_result(instrument) and instrument_record(instrument, symbol))
+    account_ready = False
+    if cli_ready:
+        try:
+            account = adapter.account()
+            account_ready = account.get("status") == "ok" and "DEMO_ACCOUNT" in account.get("labels", []) and structured_result(account)
+        except BitgetError:
+            account_ready = False
+    if not market_ready:
+        reasons.append("BITGET_MARKET_UNVERIFIED")
+    if not instrument_ready:
+        reasons.append("BITGET_INSTRUMENT_UNVERIFIED")
+    if not account_ready:
+        reasons.append("BITGET_ACCOUNT_UNVERIFIED")
+    if CONFIG.bitget_mode != "paper":
+        reasons.append("BITGET_PAPER_UNAVAILABLE")
+    reasons = list(dict.fromkeys(reasons))
+    environment_ready = not reasons
     return {
-        "mode": CONFIG.bitget_mode,
-        "live_trading_enabled": CONFIG.live_trading_enabled,
-        "market_reads": True,
-        "paper_orders": CONFIG.bitget_mode == "paper",
-        "live_orders": CONFIG.bitget_mode == "live" and CONFIG.live_trading_enabled,
+        "qwen": qwen_status,
+        "bitget_cli": "READY" if cli_ready else "UNVERIFIED",
+        "bitget_market": "READY" if market_ready else "UNVERIFIED",
+        "bitget_instrument": "READY" if instrument_ready else "UNVERIFIED",
+        "bitget_account": "READY" if account_ready else "UNVERIFIED",
+        "bitget_paper": "READY" if paper_ready else "UNVERIFIED",
+        "external_target": "READY" if external_ready else "UNVERIFIED",
+        "paper_run_ready": environment_ready,
+        "environment_ready": environment_ready,
+        "official_track2_ready": environment_ready,
+        "blocking_reasons": reasons,
     }
-
-
-@app.post("/trading/orders/preview")
-def preview_live_order(request: LiveOrderDraft) -> dict[str, object]:
-    return {
-        "symbol": request.symbol,
-        "side": request.side,
-        "notional": str(request.notional),
-        "mode": CONFIG.bitget_mode,
-        "armed": CONFIG.bitget_mode == "live" and CONFIG.live_trading_enabled,
-    }
-
-
-@app.post("/trading/orders", response_model=LiveOrder)
-def execute_live_order(request: LiveOrderRequest) -> LiveOrder:
-    if not request.confirm:
-        raise HTTPException(status_code=409, detail="LIVE_CONFIRMATION_REQUIRED")
-    if CONFIG.bitget_mode != "live":
-        raise HTTPException(status_code=409, detail="LIVE_MODE_REQUIRED")
-    if not CONFIG.live_trading_enabled:
-        raise HTTPException(status_code=503, detail="LIVE_TRADING_DISABLED")
-    try:
-        order, created = db.reserve_live_order(DB_PATH, request)
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    if not created:
-        return order
-    try:
-        result = BitgetAdapter(CONFIG).live_order(request.symbol, request.side, request.notional)
-    except BitgetError as error:
-        result = {"status": "error", "code": str(error)}
-    status = "SUBMITTED" if result.get("status") == "ok" else "UNKNOWN" if result.get("status") == "unknown" else "FAILED"
-    return db.update_live_order(DB_PATH, order.id, status, result)
-
-
-@app.get("/trading/orders/{order_id}", response_model=LiveOrder)
-def read_live_order(order_id: str) -> LiveOrder:
-    try:
-        return db.get_live_order(DB_PATH, order_id)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail="ORDER_NOT_FOUND") from error
 
 
 @app.get("/targets")
@@ -123,7 +131,7 @@ async def create_run(request: RunCreate) -> Run:
     run = db.create_run(DB_PATH, request)
     REQUESTS[run.id] = request
     graph.set_target(run.id, request.target_url, request.target_token)
-    db.add_event(DB_PATH, run.id, "RUN_CREATED", {"target_id": run.target_id, "mode": run.mode.value, "max_episodes": run.max_episodes})
+    db.add_event(DB_PATH, run.id, "RUN_CREATED", {"target_id": run.target_id, "target_name": run.target_name, "target_version": run.target_version, "target_model": run.target_model, "mode": run.mode.value, "max_episodes": run.max_episodes})
     _schedule(run.id)
     return run
 
@@ -154,6 +162,18 @@ def weaknesses(run_id: str):
 def run_score(run_id: str) -> Scorecard:
     _run(run_id)
     return score(db.get_episodes(DB_PATH, run_id))
+
+
+@app.get("/runs/{run_id}/verification", response_model=VerificationSummary)
+def run_verification(run_id: str) -> VerificationSummary:
+    run = _run(run_id)
+    return paper_verification(run.mode, run.target_id, db.get_episodes(DB_PATH, run_id), run.target_url, run.target_name, run.target_version, run.target_model)
+
+
+@app.get("/runs/{run_id}/metrics", response_model=EvaluationMetrics)
+def run_metrics(run_id: str) -> EvaluationMetrics:
+    _run(run_id)
+    return metrics(db.get_episodes(DB_PATH, run_id))
 
 
 async def _events(run_id: str) -> AsyncIterator[str]:

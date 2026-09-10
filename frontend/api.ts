@@ -1,8 +1,10 @@
-const base = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const base = import.meta.env?.VITE_API_URL || "http://localhost:8000";
 
 export type Run = {
   id: string;
   target_id: string;
+  target_name: string | null;
+  target_model: string | null;
   target_version: string;
   mode: "SYNTHETIC" | "BITGET_PAPER";
   status: "CREATED" | "RUNNING" | "COMPLETED" | "STOPPED" | "FAILED";
@@ -14,14 +16,65 @@ export type Run = {
   last_failure: string | null;
 };
 
+export type RunInput = Pick<Run, "target_id" | "target_version" | "mode" | "max_episodes" | "difficulty"> & {
+  target_url?: string;
+  target_name?: string;
+  target_model?: string;
+  target_token?: string;
+};
+
+export type EvidenceRecord = {
+  evidence_id: string;
+  kind: string;
+  summary: string;
+  observed_at: string;
+  source_labels: string[];
+  authoritative: boolean;
+};
+
+export type TraceRecord = {
+  sequence: number;
+  tool: string;
+  arguments: Record<string, unknown>;
+  timestamp: string;
+  result_status: string;
+  result: Record<string, unknown>;
+  latency_ms: number;
+  verification_labels: string[];
+};
+
+export type DecisionRecord = {
+  action: string;
+  symbol?: string;
+  notional?: string;
+  confidence: number;
+  reason: string;
+  evidence_used: string[];
+};
+
+export type OracleRecord = { name: string; category: string; status: string; code: string; details: string; labels: string[] };
+
+export type CriticRecord = {
+  diagnosis: string;
+  failure_class: string;
+  trigger: string;
+  mutation_direction: string;
+  model: string;
+  prompt_name: string;
+  prompt_version: string;
+  labels: string[];
+};
+
 export type Episode = {
   id: string;
   number: number;
   category: string;
   difficulty: number;
-  scenario: { title: string; source_labels: string[] };
-  decision: { action: string; symbol?: string; notional?: string } | null;
-  oracle_results: { name: string; category: string; status: string; code: string }[];
+  scenario: { scenario_id: string; title: string; description: string; category: string; difficulty: number; source_labels: string[]; evidence: EvidenceRecord[]; mutation_reason?: string | null };
+  target_trace: TraceRecord[];
+  decision: DecisionRecord | null;
+  oracle_results: OracleRecord[];
+  critic: CriticRecord;
   failure_type: string | null;
   result: string;
 };
@@ -29,8 +82,49 @@ export type Episode = {
 export type Scorecard = {
   score: number;
   label: string;
-  breakdown: { policy: number; freshness: number; sizing: number; takeover: number; execution: number; consistency: number; tool_discipline: number };
+  breakdown: Record<string, number>;
+  measured: Record<string, { pass: number; total: number }>;
+  coverage_pct: number;
+  measured_weight: number;
+  possible_weight: number;
   primary_weakness: string | null;
+};
+
+export type EvaluationMetrics = {
+  total_scenarios: number;
+  total_episodes: number;
+  pass_rate: number;
+  failure_rate: number;
+  risk_violation_count: number;
+  risk_violation_rate: number;
+  false_autonomy_count: number;
+  false_autonomy_rate: number;
+  unnecessary_escalation_count: number;
+  unnecessary_escalation_rate: number;
+  takeover_required_count: number;
+  takeover_success_count: number;
+  takeover_accuracy: number | null;
+  consistency_failure_count: number;
+  consistency_failure_rate: number;
+  tool_precondition_violation_count: number;
+  duplicate_action_count: number;
+  execution_mismatch_count: number;
+  primary_recurring_weakness: string | null;
+  difficulty_reached: number;
+  targeted_mutations: number;
+  mutation_retest_passes: number;
+  mutation_retest_failures: number;
+  paper_trade_count: number;
+  paper_metrics_status: "UNAVAILABLE" | "UNVERIFIED";
+  win_rate: number | null;
+  pnl: number | null;
+  return_pct: number | null;
+  sharpe: number | null;
+  sortino: number | null;
+  max_drawdown: number | null;
+  turnover: number | null;
+  fees: number | null;
+  slippage: number | null;
 };
 
 export type Weakness = {
@@ -40,74 +134,41 @@ export type Weakness = {
   fails: number;
   passes: number;
   failure_rate: number;
-  updated_at: string;
 };
 
-export type TradingStatus = {
-  mode: string;
-  live_trading_enabled: boolean;
-  market_reads: boolean;
-  paper_orders: boolean;
-  live_orders: boolean;
-};
-
-export type LiveOrder = {
-  id: string;
-  idempotency_key: string;
-  symbol: string;
-  side: "BUY" | "SELL";
-  notional: string;
-  status: "SUBMITTING" | "SUBMITTED" | "FAILED" | "UNKNOWN";
-  result: Record<string, unknown>;
+export type GraphEvent = {
+  id: number;
+  run_id: string;
+  type: string;
+  payload: Record<string, unknown>;
   created_at: string;
-  updated_at: string;
+};
+
+export type Verification = {
+  status: "NOT_APPLICABLE" | "UNVERIFIED" | "READY";
+  official_track2_ready: boolean;
+  blocking_reasons: string[];
+  evidence?: Record<string, boolean>;
+  target_identity?: Record<string, string | null>;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${base}${path}`, { headers: { "Content-Type": "application/json" }, ...init });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(body || `HTTP_${response.status}`);
-  }
+  const response = await fetch(`${base}${path}`, {
+    ...init,
+    signal: init?.signal ?? AbortSignal.timeout(15000),
+    headers: { "Content-Type": "application/json", ...init?.headers },
+  });
+  if (!response.ok) throw new Error(`HTTP_${response.status}`);
   return response.json() as Promise<T>;
 }
 
-export function createRun(input: { target_id: string; target_version: string; mode: Run["mode"]; max_episodes: number; difficulty: number }) {
-  return request<Run>("/runs", { method: "POST", body: JSON.stringify(input) });
-}
-
-export function getRun(id: string) {
-  return request<Run>(`/runs/${id}`);
-}
-
-export function getEpisodes(id: string) {
-  return request<Episode[]>(`/runs/${id}/episodes`);
-}
-
-export function getScore(id: string) {
-  return request<Scorecard>(`/runs/${id}/score`);
-}
-
-export function getWeaknesses(id: string) {
-  return request<Weakness[]>(`/runs/${id}/weaknesses`);
-}
-
-export function stopRun(id: string) {
-  return request<Run>(`/runs/${id}/stop`, { method: "POST" });
-}
-
-export function eventUrl(id: string) {
-  return `${base}/runs/${id}/events`;
-}
-
-export function getTradingStatus() {
-  return request<TradingStatus>("/trading/status");
-}
-
-export function previewLiveOrder(input: { symbol: string; side: "BUY" | "SELL"; notional: string }) {
-  return request<{ symbol: string; side: "BUY" | "SELL"; notional: string; mode: string; armed: boolean }>("/trading/orders/preview", { method: "POST", body: JSON.stringify(input) });
-}
-
-export function executeLiveOrder(input: { symbol: string; side: "BUY" | "SELL"; notional: string; idempotency_key: string; confirm: boolean }) {
-  return request<LiveOrder>("/trading/orders", { method: "POST", body: JSON.stringify(input) });
-}
+export const createRun = (input: RunInput) => request<Run>("/runs", { method: "POST", body: JSON.stringify(input) });
+export const getRuns = () => request<Run[]>("/runs");
+export const getRun = (id: string) => request<Run>(`/runs/${encodeURIComponent(id)}`);
+export const getEpisodes = (id: string) => request<Episode[]>(`/runs/${encodeURIComponent(id)}/episodes`);
+export const getScore = (id: string) => request<Scorecard>(`/runs/${encodeURIComponent(id)}/score`);
+export const getMetrics = (id: string) => request<EvaluationMetrics>(`/runs/${encodeURIComponent(id)}/metrics`);
+export const getWeaknesses = (id: string) => request<Weakness[]>(`/runs/${encodeURIComponent(id)}/weaknesses`);
+export const getVerification = (id: string) => request<Verification>(`/runs/${encodeURIComponent(id)}/verification`);
+export const stopRun = (id: string) => request<Run>(`/runs/${encodeURIComponent(id)}/stop`, { method: "POST" });
+export const eventUrl = (id: string) => `${base}/runs/${encodeURIComponent(id)}/events`;

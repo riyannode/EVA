@@ -2,9 +2,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Literal
-from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -41,7 +40,6 @@ class Action(str, Enum):
 class VerificationLabel(str, Enum):
     LIVE_MARKET = "LIVE_MARKET"
     DEMO_ACCOUNT = "DEMO_ACCOUNT"
-    LIVE_EXECUTION = "LIVE_EXECUTION"
     PAPER_EXECUTION = "PAPER_EXECUTION"
     SYNTHETIC_SCENARIO = "SYNTHETIC_SCENARIO"
     SYNTHETIC_MUTATION = "SYNTHETIC_MUTATION"
@@ -174,54 +172,32 @@ class CriticResult(StrictModel):
 class RunCreate(StrictModel):
     target_id: str = Field(min_length=1, max_length=100)
     target_version: str = Field(default="demo", min_length=1, max_length=40)
+    target_name: str | None = Field(default=None, max_length=100)
+    target_model: str | None = Field(default=None, max_length=100)
     target_url: str | None = Field(default=None, max_length=500)
     target_token: str | None = Field(default=None, max_length=500)
     mode: Mode = Mode.SYNTHETIC
     max_episodes: int = Field(default=20, ge=1, le=100)
     difficulty: int = Field(default=1, ge=1, le=5)
 
-
-class LiveOrderDraft(StrictModel):
-    symbol: str = Field(min_length=1, max_length=40)
-    side: Literal["BUY", "SELL"]
-    notional: Decimal = Field(gt=0)
-
-    @field_validator("symbol", mode="before")
-    @classmethod
-    def normalize_symbol(cls, value: object) -> str:
-        return str(value).upper()
-
-
-class LiveOrderRequest(LiveOrderDraft):
-    idempotency_key: str = Field(min_length=16, max_length=100)
-    confirm: bool = False
-
-    @field_validator("idempotency_key")
-    @classmethod
-    def validate_idempotency_key(cls, value: str) -> str:
-        try:
-            UUID(value)
-        except ValueError as error:
-            raise ValueError("INVALID_IDEMPOTENCY_KEY") from error
-        return value
-
-
-class LiveOrder(StrictModel):
-    id: str
-    idempotency_key: str
-    symbol: str
-    side: Literal["BUY", "SELL"]
-    notional: Decimal
-    status: Literal["SUBMITTING", "SUBMITTED", "FAILED", "UNKNOWN"]
-    result: dict[str, object] = Field(default_factory=dict)
-    created_at: datetime
-    updated_at: datetime
+    @model_validator(mode="after")
+    def validate_paper_target(self) -> "RunCreate":
+        if self.mode == Mode.BITGET_PAPER and self.target_id != "EXTERNAL_HTTP":
+            raise ValueError("BITGET_PAPER_EXTERNAL_TARGET_REQUIRED")
+        if self.mode == Mode.BITGET_PAPER and not self.target_url:
+            raise ValueError("TARGET_URL_REQUIRED")
+        if self.mode == Mode.BITGET_PAPER and (not self.target_name or not self.target_model):
+            raise ValueError("TARGET_IDENTITY_REQUIRED")
+        return self
 
 
 class Run(StrictModel):
     id: str
     target_id: str
     target_version: str
+    target_name: str | None = None
+    target_model: str | None = None
+    target_url: str | None = None
     mode: Mode
     status: RunStatus
     difficulty: int
@@ -250,8 +226,56 @@ class Scorecard(StrictModel):
     label: str
     breakdown: ScoreBreakdown
     measured: dict[str, dict[str, int]] = Field(default_factory=dict)
+    measured_weight: int = Field(default=0, ge=0, le=100)
+    possible_weight: int = Field(default=100, ge=0, le=100)
+    coverage_pct: float = Field(default=0, ge=0, le=1)
     primary_weakness: str | None = None
     labels: list[VerificationLabel] = Field(default_factory=lambda: [VerificationLabel.DETERMINISTIC_ORACLE], max_length=2)
+
+
+class VerificationSummary(StrictModel):
+    status: Literal["NOT_APPLICABLE", "UNVERIFIED", "READY"]
+    official_track2_ready: bool
+    evidence: dict[str, bool] = Field(default_factory=dict)
+    target_identity: dict[str, str | None] = Field(default_factory=dict)
+    blocking_reasons: list[str] = Field(default_factory=list, max_length=20)
+
+
+class EvaluationMetrics(StrictModel):
+    total_scenarios: int = Field(ge=0)
+    total_episodes: int = Field(ge=0)
+    pass_rate: float = Field(ge=0, le=1)
+    failure_rate: float = Field(ge=0, le=1)
+    risk_violation_count: int = Field(ge=0)
+    risk_violation_rate: float = Field(ge=0, le=1)
+    false_autonomy_count: int = Field(ge=0)
+    false_autonomy_rate: float = Field(ge=0, le=1)
+    unnecessary_escalation_count: int = Field(ge=0)
+    unnecessary_escalation_rate: float = Field(ge=0, le=1)
+    takeover_required_count: int = Field(ge=0)
+    takeover_success_count: int = Field(ge=0)
+    takeover_accuracy: float | None = Field(default=None, ge=0, le=1)
+    consistency_failure_count: int = Field(ge=0)
+    consistency_failure_rate: float = Field(ge=0, le=1)
+    tool_precondition_violation_count: int = Field(ge=0)
+    duplicate_action_count: int = Field(ge=0)
+    execution_mismatch_count: int = Field(ge=0)
+    primary_recurring_weakness: str | None = None
+    difficulty_reached: int = Field(ge=0, le=5)
+    targeted_mutations: int = Field(ge=0)
+    mutation_retest_passes: int = Field(ge=0)
+    mutation_retest_failures: int = Field(ge=0)
+    paper_trade_count: int = Field(ge=0)
+    paper_metrics_status: Literal["UNAVAILABLE", "UNVERIFIED"]
+    win_rate: float | None = Field(default=None, ge=0, le=1)
+    pnl: float | None = None
+    return_pct: float | None = None
+    sharpe: float | None = None
+    sortino: float | None = None
+    max_drawdown: float | None = None
+    turnover: float | None = None
+    fees: float | None = None
+    slippage: float | None = None
 
 
 class Weakness(StrictModel):

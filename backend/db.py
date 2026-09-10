@@ -3,10 +3,9 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 
-from models import CriticResult, Decision, Episode, Event, LiveOrder, LiveOrderRequest, Mode, OracleResult, Run, RunCreate, RunStatus, Scenario, TargetListing, ToolTrace, Weakness
+from models import CriticResult, Decision, Episode, Event, Mode, OracleResult, Run, RunCreate, RunStatus, Scenario, TargetListing, ToolTrace, Weakness
 
 
 def now() -> datetime:
@@ -57,6 +56,9 @@ def init_db(path: Path) -> None:
                 id TEXT PRIMARY KEY,
                 target_id TEXT NOT NULL,
                 target_version TEXT NOT NULL,
+                target_name TEXT,
+                target_model TEXT,
+                target_url TEXT,
                 mode TEXT NOT NULL,
                 status TEXT NOT NULL,
                 difficulty INTEGER NOT NULL,
@@ -109,19 +111,16 @@ def init_db(path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS events_run_id_id ON events(run_id, id);
             CREATE INDEX IF NOT EXISTS episodes_run_id_number ON episodes(run_id, number);
-            CREATE TABLE IF NOT EXISTS live_orders (
-                id TEXT PRIMARY KEY,
-                idempotency_key TEXT NOT NULL UNIQUE,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                notional TEXT NOT NULL,
-                status TEXT NOT NULL,
-                result_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
             """
         )
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+        if "target_name" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN target_name TEXT")
+        if "target_model" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN target_model TEXT")
+        if "target_url" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN target_url TEXT")
+        connection.execute("DROP TABLE IF EXISTS live_orders")
 
 
 def create_run(path: Path, request: RunCreate) -> Run:
@@ -129,8 +128,8 @@ def create_run(path: Path, request: RunCreate) -> Run:
     created = now()
     with _session(path) as connection:
         connection.execute(
-            "INSERT INTO runs (id, target_id, target_version, mode, status, difficulty, max_episodes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (run_id, request.target_id, request.target_version, request.mode.value, RunStatus.CREATED.value, request.difficulty, request.max_episodes, created.isoformat()),
+            "INSERT INTO runs (id, target_id, target_version, target_name, target_model, target_url, mode, status, difficulty, max_episodes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, request.target_id, request.target_version, request.target_name, request.target_model, request.target_url, request.mode.value, RunStatus.CREATED.value, request.difficulty, request.max_episodes, created.isoformat()),
         )
     return get_run(path, run_id)
 
@@ -140,6 +139,9 @@ def _run(row: sqlite3.Row) -> Run:
         id=row["id"],
         target_id=row["target_id"],
         target_version=row["target_version"],
+        target_name=row["target_name"],
+        target_model=row["target_model"],
+        target_url=row["target_url"],
         mode=Mode(row["mode"]),
         status=RunStatus(row["status"]),
         difficulty=row["difficulty"],
@@ -202,6 +204,23 @@ def update_run(path: Path, run_id: str, status: RunStatus | None = None, stage: 
     return get_run(path, run_id)
 
 
+def _update_weakness(connection: sqlite3.Connection, run: Run, failure: str, category: str, failed: bool, created: datetime) -> None:
+    existing = connection.execute(
+        "SELECT id, attempts, fails, passes FROM weaknesses WHERE target_id = ? AND target_version = ? AND failure_type = ? AND category = ?",
+        (run.target_id, run.target_version, failure, category),
+    ).fetchone()
+    if existing:
+        connection.execute(
+            "UPDATE weaknesses SET attempts = ?, fails = ?, passes = ?, updated_at = ? WHERE id = ?",
+            (existing["attempts"] + 1, existing["fails"] + int(failed), existing["passes"] + int(not failed), created.isoformat(), existing["id"]),
+        )
+    else:
+        connection.execute(
+            "INSERT INTO weaknesses (target_id, target_version, failure_type, category, attempts, fails, passes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (run.target_id, run.target_version, failure, category, 1, int(failed), int(not failed), created.isoformat()),
+        )
+
+
 def insert_episode(path: Path, run: Run, scenario: Scenario, trace: list[ToolTrace], decision: Decision | None, oracle_results: list[OracleResult], critic: CriticResult, failure_type: str | None, result: str) -> Episode:
     episode_id = str(uuid.uuid4())
     created = now()
@@ -210,21 +229,11 @@ def insert_episode(path: Path, run: Run, scenario: Scenario, trace: list[ToolTra
             "INSERT INTO episodes (id, run_id, number, scenario_id, parent_scenario_id, category, difficulty, scenario_json, target_trace_json, decision_json, oracle_json, critic_json, failure_type, result, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (episode_id, run.id, run.episode, scenario.scenario_id, scenario.parent_scenario_id, scenario.category.value, scenario.difficulty, _text(scenario), _text(trace), _text(decision) if decision else None, _text(oracle_results), _text(critic), failure_type, result, created.isoformat()),
         )
-        key_failure = failure_type or "PASS"
-        existing = connection.execute(
-            "SELECT id, attempts, fails, passes FROM weaknesses WHERE target_id = ? AND target_version = ? AND failure_type = ? AND category = ?",
-            (run.target_id, run.target_version, key_failure, scenario.category.value),
-        ).fetchone()
-        if existing:
-            connection.execute(
-                "UPDATE weaknesses SET attempts = ?, fails = ?, passes = ?, updated_at = ? WHERE id = ?",
-                (existing["attempts"] + 1, existing["fails"] + (1 if failure_type else 0), existing["passes"] + (0 if failure_type else 1), created.isoformat(), existing["id"]),
-            )
-        else:
-            connection.execute(
-                "INSERT INTO weaknesses (target_id, target_version, failure_type, category, attempts, fails, passes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (run.target_id, run.target_version, key_failure, scenario.category.value, 1, 1 if failure_type else 0, 0 if failure_type else 1, created.isoformat()),
-            )
+        targeted_failure = scenario.mutation_reason if scenario.parent_scenario_id and scenario.mutation_reason else None
+        if targeted_failure:
+            _update_weakness(connection, run, targeted_failure, scenario.category.value, failure_type == targeted_failure, created)
+        if failure_type and failure_type != targeted_failure:
+            _update_weakness(connection, run, failure_type, scenario.category.value, True, created)
     update_run(path, run.id, stage="SAVE_MEMORY", failure=failure_type)
     return Episode(id=episode_id, run_id=run.id, number=run.episode, scenario_id=scenario.scenario_id, parent_scenario_id=scenario.parent_scenario_id, category=scenario.category.value, difficulty=scenario.difficulty, scenario=scenario, target_trace=trace, decision=decision, oracle_results=oracle_results, critic=critic, failure_type=failure_type, result=result, created_at=created)
 
@@ -253,55 +262,6 @@ def get_episodes(path: Path, run_id: str) -> list[Episode]:
     with _session(path) as connection:
         rows = connection.execute("SELECT * FROM episodes WHERE run_id = ? ORDER BY number", (run_id,)).fetchall()
     return [_episode(row) for row in rows]
-
-
-def _live_order(row: sqlite3.Row) -> LiveOrder:
-    return LiveOrder(
-        id=row["id"],
-        idempotency_key=row["idempotency_key"],
-        symbol=row["symbol"],
-        side=row["side"],
-        notional=Decimal(row["notional"]),
-        status=row["status"],
-        result=_payload(row["result_json"]),
-        created_at=datetime.fromisoformat(row["created_at"]),
-        updated_at=datetime.fromisoformat(row["updated_at"]),
-    )
-
-
-def get_live_order(path: Path, order_id: str) -> LiveOrder:
-    with _session(path) as connection:
-        row = connection.execute("SELECT * FROM live_orders WHERE id = ?", (order_id,)).fetchone()
-    if row is None:
-        raise KeyError("ORDER_NOT_FOUND")
-    return _live_order(row)
-
-
-def reserve_live_order(path: Path, request: LiveOrderRequest) -> tuple[LiveOrder, bool]:
-    order_id = str(uuid.uuid4())
-    created = now()
-    try:
-        with _session(path) as connection:
-            connection.execute(
-                "INSERT INTO live_orders (id, idempotency_key, symbol, side, notional, status, result_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (order_id, request.idempotency_key, request.symbol, request.side, str(request.notional), "SUBMITTING", "{}", created.isoformat(), created.isoformat()),
-            )
-    except sqlite3.IntegrityError:
-        with _session(path) as connection:
-            row = connection.execute("SELECT * FROM live_orders WHERE idempotency_key = ?", (request.idempotency_key,)).fetchone()
-        if row is None:
-            raise
-        if row["symbol"] != request.symbol or row["side"] != request.side or Decimal(row["notional"]) != request.notional:
-            raise ValueError("IDEMPOTENCY_CONFLICT")
-        return _live_order(row), False
-    return get_live_order(path, order_id), True
-
-
-def update_live_order(path: Path, order_id: str, status: str, result: dict[str, object]) -> LiveOrder:
-    updated = now()
-    with _session(path) as connection:
-        connection.execute("UPDATE live_orders SET status = ?, result_json = ?, updated_at = ? WHERE id = ?", (status, _text(result), updated.isoformat(), order_id))
-    return get_live_order(path, order_id)
 
 
 def get_weaknesses(path: Path, target_id: str | None = None, target_version: str | None = None) -> list[Weakness]:
