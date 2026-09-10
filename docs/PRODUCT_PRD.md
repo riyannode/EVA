@@ -63,7 +63,7 @@ Current EVA authority split:
 2. CURRENT EVA V1 — KEEP STABLE
 ============================================================
 
-Current verified product capabilities:
+Current implementation/test-verified product capabilities:
 
 [CORE]
 - Adaptive evaluation loop
@@ -105,6 +105,41 @@ Current verified product capabilities:
 - Response-size cap
 - Tool-step cap
 
+These capabilities describe implementation and test coverage. A standalone runtime component is runtime-verified only when its actual environment evidence is available. Full external-target paper evaluation remains a separate E2E verification state.
+
+Full external-target BITGET_PAPER E2E:
+
+EVA scenario
+→ external trader
+→ trader requests market/account
+→ EVA supplies verified Bitget evidence
+→ trader independently decides
+→ trader requests paper_order
+→ EVA pre-execution gate
+→ Bitget PAPER execution
+→ verified order fill
+→ deterministic oracle reconciliation
+→ Qwen critic
+→ weakness memory
+→ targeted mutation
+→ retest
+→ final readiness score
+
+STATUS: NOT YET VERIFIED
+
+Standalone implementation and runtime evidence must not be presented as proof of this complete external-target workflow.
+
+Permanent pre-execution financial write gate:
+
+External Trader requests paper_order
+→ EVA records attempted action
+→ deterministic pre-execution policy gate
+→ if blocked: structured rejection, attempted violation recorded, and NO Bitget write
+→ if allowed: Bitget PAPER placement, order reference capture, exact order-detail read, and filled-state verification
+→ deterministic oracle evaluates trader behavior and execution reconciliation
+
+The gate checks allowed symbol, blocked symbol, action restrictions, max order notional, max exposure, emergency stop, verified account evidence, sufficient available balance, verified instrument constraints, and required market evidence. The oracle may fail a prohibited attempt, but a prohibited financial write is never sent. Live trading remains out of scope.
+
 V1 must remain available until replacement transport is fully proven.
 
 DO NOT remove EXTERNAL_HTTP before the new Agent Gateway has:
@@ -144,6 +179,25 @@ Target onboarding time:
 
 Target first evaluation:
 < 10 minutes from signup to first completed synthetic evaluation.
+
+============================================================
+P0 PUBLIC SECURITY BASELINE — REQUIRED BEFORE PUBLIC DISTRIBUTION
+============================================================
+
+Public EVA is NOT production-ready unless:
+
+- HTTPS/WSS is used for public authenticated traffic
+- plain HTTP is limited to local/private development
+- mutating endpoints require authentication
+- evaluation creation is rate-limited
+- public backend ports are not unnecessarily exposed
+- API keys, bearer tokens, target tokens, and secrets never traverse plaintext HTTP
+- arbitrary EXTERNAL_HTTP target URLs are disabled, allowlisted, or fully SSRF-hardened before public use
+- private, loopback, link-local, and cloud-metadata destinations are denied
+- redirects are denied or tightly controlled
+- outbound target requests have strict timeout, response-size, request-count, and budget limits
+
+This P0 baseline gates public onboarding, broad external-agent access, and public distribution. The later Security Hardening phase remains for deeper controls and abuse resistance.
 
 ============================================================
 4. TARGET PRODUCT ARCHITECTURE
@@ -198,6 +252,18 @@ x402
 
 REST/OpenAPI must remain the canonical public product contract.
 MCP must wrap the same product API, not become the internal source of truth.
+
+Lightweight Graph Engineering principle:
+
+- LangGraph remains the workflow/state-machine orchestration layer.
+- Current relational persistence remains the source of truth.
+- Preserve explicit lineage between evaluations, episodes, weaknesses, mutations, retests, evidence, and execution.
+- Store provenance so important results can be traced to the evaluation run and evidence that produced them.
+- Do not add a dedicated graph database, Neo4j, or similar infrastructure.
+- Do not redesign the current data model just to make it graph-shaped.
+- Consider a dedicated graph layer only if real product usage proves relational storage insufficient.
+
+Graph Engineering means lineage and provenance with explicit relationships. It does not mean a knowledge-graph platform, graph database migration, swarm architecture, multi-agent graph infrastructure, or complex DAG service.
 
 ============================================================
 5. EXTERNAL AGENT GATEWAY
@@ -985,6 +1051,8 @@ Exit criteria:
 PHASE 2 — AGENT REGISTRY + API AUTH
 Priority: High
 
+Public access remains gated by the P0 Public Security Baseline.
+
 Goal:
 Turn EVA from demo target input into managed platform.
 
@@ -1037,6 +1105,8 @@ Exit criteria:
 PHASE 4 — ONE-CLICK ONBOARDING
 Priority: High
 
+This phase starts only after the P0 Public Security Baseline is in place.
+
 Goal:
 <5 minute integration.
 
@@ -1063,8 +1133,10 @@ without editing EVA source code.
 
 ------------------------------------------------------------
 
-PHASE 5 — SECURITY HARDENING
+PHASE 5 — SECURITY HARDENING — DEEPER CONTROLS
 Priority: Required before public distribution
+
+The P0 Public Security Baseline above is the minimum prerequisite; this phase adds deeper hardening before broad public distribution.
 
 Tasks:
 - rate limiting
@@ -1142,6 +1214,8 @@ Exit criteria:
 
 PHASE 8 — PUBLIC PLATFORM DISTRIBUTION
 Priority: Medium
+
+Requires the P0 Public Security Baseline and the applicable deeper Security Hardening controls.
 
 Tasks:
 - public docs
