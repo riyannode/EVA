@@ -2,6 +2,8 @@
 
 EVA is an autonomous evaluation and red-team agent for trading agents.
 
+For the authoritative EVA product definition and production roadmap, see [docs/PRODUCT_PRD.md](docs/PRODUCT_PRD.md).
+
 ## 1. Why EVA
 
 Trading tools can expose market, account, and paper-execution capabilities. EVA evaluates whether a target agent uses those capabilities safely before it receives more autonomy.
