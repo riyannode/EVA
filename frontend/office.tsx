@@ -1,24 +1,35 @@
 import { useEffect, useRef, useState } from "react";
 import { animate } from "animejs";
 import * as THREE from "three";
-import { stations, type StationId } from "./graph-view";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import type { GraphEvent } from "./api";
+import { aislePath, deskPositions } from "./office-motion";
+import { eventStops, stations, type StationId } from "./graph-view";
 
 type OfficeProps = {
   active: StationId | null;
   selected: StationId;
-  eventId: number;
+  events: GraphEvent[];
+  running: boolean;
   motion: boolean;
   onSelect: (id: StationId) => void;
 };
 
-const positions: [number, number][] = [[-5.5, -2.7], [0, -2.7], [5.5, -2.7], [-5.5, 2.2], [0, 2.2], [5.5, 2.2]];
+const positions = deskPositions;
+type CameraView = "Orbit" | "Top" | "Front" | "Side";
+const cameraViews: Record<CameraView, [number, number, number]> = {
+  Orbit: [15, 20, 25], Top: [0, 32, 0.01], Front: [0, 9, 32], Side: [32, 10, 0],
+};
 
-export default function Office({ active, selected, eventId, motion, onSelect }: OfficeProps) {
+export default function Office({ active, selected, events, running, motion, onSelect }: OfficeProps) {
   const mount = useRef<HTMLDivElement>(null);
   const labels = useRef<(HTMLButtonElement | null)[]>([]);
-  const current = useRef({ active, selected, eventId, motion });
-  current.current = { active, selected, eventId, motion };
+  const current = useRef({ active, selected, events, running, motion });
+  current.current = { active, selected, events, running, motion };
   const [unavailable, setUnavailable] = useState(false);
+  const [cameraView, setCameraView] = useState<CameraView | "Custom">("Orbit");
+  const moveCamera = useRef<(view: CameraView) => void>(() => {});
+  const zoomCamera = useRef<(factor: number) => void>(() => {});
 
   useEffect(() => {
     const host = mount.current;
@@ -38,6 +49,32 @@ export default function Office({ active, selected, eventId, motion, onSelect }: 
     const camera = new THREE.OrthographicCamera(-13, 13, 10, -10, 0.1, 150);
     camera.position.set(15, 20, 25);
     camera.lookAt(0, 0.6, 0);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0.6, 0);
+    controls.enableDamping = false;
+    controls.enablePan = false;
+    controls.minPolarAngle = 0.001;
+    controls.maxPolarAngle = Math.PI / 2 - 0.03;
+    controls.minZoom = 0.65;
+    controls.maxZoom = 2;
+    controls.update();
+    let cameraTween: ReturnType<typeof animate> | null = null;
+    moveCamera.current = view => {
+      cameraTween?.cancel();
+      const [x, y, z] = cameraViews[view];
+      camera.zoom = 1;
+      camera.updateProjectionMatrix();
+      if (current.current.motion) cameraTween = animate(camera.position, {
+        x, y, z, duration: 450, ease: "outCubic", onUpdate: () => controls.update(),
+      });
+      else { camera.position.set(x, y, z); controls.update(); }
+    };
+    zoomCamera.current = factor => {
+      camera.zoom = THREE.MathUtils.clamp(camera.zoom * factor, controls.minZoom, controls.maxZoom);
+      camera.updateProjectionMatrix();
+    };
+    const onOrbit = () => { cameraTween?.cancel(); setCameraView("Custom"); };
+    controls.addEventListener("start", onOrbit);
     scene.add(new THREE.AmbientLight(0xb7c9e8, 1.7));
     const sun = new THREE.DirectionalLight(0xffe0bb, 3.2);
     sun.position.set(-5, 15, 10);
@@ -65,6 +102,9 @@ export default function Office({ active, selected, eventId, motion, onSelect }: 
     }
     const room = new THREE.Group();
     scene.add(room);
+    const backWall = new THREE.Group();
+    const sideWall = new THREE.Group();
+    room.add(backWall, sideWall);
     box(room, 0, -0.45, 0, 19, 0.8, 12.6, "#1c2931");
     box(room, 0, -0.02, 0, 18.6, 0.12, 12.2, "#49403a");
     for (let row = 0; row < 16; row++) {
@@ -72,23 +112,23 @@ export default function Office({ active, selected, eventId, motion, onSelect }: 
         box(room, -8.22 + col * 2.06, 0.06, -5.68 + row * 0.75, 2.02, 0.08, 0.71, ["#665345", "#715c49", "#79614d", "#605044"][(row * 3 + col * 7) % 4]);
       }
     }
-    box(room, 0, 1.7, -6.15, 19, 3.5, 0.3, "#354453");
-    box(room, -9.35, 1.7, 0, 0.3, 3.5, 12.6, "#293844");
-    box(room, 0, 3.48, -6.15, 19.2, 0.16, 0.44, "#7b8b91");
-    box(room, -9.35, 3.48, 0, 0.44, 0.16, 12.7, "#61737a");
-    box(room, 0, 0.35, -5.93, 18.5, 0.26, 0.14, "#a7916d");
-    box(room, -9.12, 0.35, 0, 0.14, 0.26, 12, "#8d785d");
+    box(backWall, 0, 1.7, -6.15, 19, 3.5, 0.3, "#354453");
+    box(sideWall, -9.35, 1.7, 0, 0.3, 3.5, 12.6, "#293844");
+    box(backWall, 0, 3.48, -6.15, 19.2, 0.16, 0.44, "#7b8b91");
+    box(sideWall, -9.35, 3.48, 0, 0.44, 0.16, 12.7, "#61737a");
+    box(backWall, 0, 0.35, -5.93, 18.5, 0.26, 0.14, "#a7916d");
+    box(sideWall, -9.12, 0.35, 0, 0.14, 0.26, 12, "#8d785d");
     for (const x of [-5.6, 0, 5.6]) {
-      box(room, x, 2, -5.93, 3.9, 2.1, 0.16, "#182834");
-      box(room, x, 2.04, -5.81, 3.55, 1.76, 0.04, "#142131");
+      box(backWall, x, 2, -5.93, 3.9, 2.1, 0.16, "#182834");
+      box(backWall, x, 2.04, -5.81, 3.55, 1.76, 0.04, "#142131");
       for (let b = 0; b < 7; b++) {
         const height = 0.25 + ((b * 11 + 3) % 7) * 0.13;
-        box(room, x - 1.55 + b * 0.5, 1.22 + height / 2, -5.75, 0.43, height, 0.04, "#26384b");
-        for (let w = 0; w < 3; w++) box(room, x - 1.63 + b * 0.5, 1.33 + w * 0.15, -5.71, 0.055, 0.05, 0.02, w % 2 ? "#668697" : "#b09a6b", true);
+        box(backWall, x - 1.55 + b * 0.5, 1.22 + height / 2, -5.75, 0.43, height, 0.04, "#26384b");
+        for (let w = 0; w < 3; w++) box(backWall, x - 1.63 + b * 0.5, 1.33 + w * 0.15, -5.71, 0.055, 0.05, 0.02, w % 2 ? "#668697" : "#b09a6b", true);
       }
-      box(room, x, 2, -5.65, 0.09, 1.83, 0.1, "#637b89");
-      box(room, x, 2.02, -5.65, 3.7, 0.09, 0.1, "#637b89");
-      box(room, x, 0.95, -5.65, 4, 0.14, 0.6, "#93a5a1");
+      box(backWall, x, 2, -5.65, 0.09, 1.83, 0.1, "#637b89");
+      box(backWall, x, 2.02, -5.65, 3.7, 0.09, 0.1, "#637b89");
+      box(backWall, x, 0.95, -5.65, 4, 0.14, 0.6, "#93a5a1");
     }
     const stars: THREE.Mesh[] = [];
     for (let i = 0; i < 38; i++) {
@@ -115,6 +155,8 @@ export default function Office({ active, selected, eventId, motion, onSelect }: 
     plant(8.3, 4.9, 1.4);
     plant(-8.1, 4.9, 1.1);
     const actors: THREE.Group[] = [];
+    const legs: THREE.Mesh[][] = [];
+    const arms: THREE.Group[][] = [];
     const screens: THREE.Mesh[] = [];
     const halos: THREE.Mesh[] = [];
     positions.forEach(([x, z], index) => {
@@ -145,21 +187,29 @@ export default function Office({ active, selected, eventId, motion, onSelect }: 
       box(room, x, 0.32, z + 1.3, 0.13, 0.6, 0.13, "#28343a");
       box(room, x, 0.17, z + 1.3, 1, 0.13, 0.15, "#28343a");
       const actor = new THREE.Group();
-      actor.position.set(x, 0.58, z + 1.03);
+      actor.position.set(x, 0.2, z + 1.03);
       room.add(actor);
       actors.push(actor);
       const skin = ["#e3b68e", "#bd8c69", "#e1b58f", "#ac795e", "#e6c0a0", "#cfa887"][index];
       const hair = ["#785745", "#27353d", "#c7c4b1", "#423149", "#ae7451", "#394c48"][index];
-      box(actor, -0.17, 0.1, 0.02, 0.24, 0.34, 0.3, "#26343e");
-      box(actor, 0.17, 0.1, 0.02, 0.24, 0.34, 0.3, "#26343e");
+      legs.push([
+        box(actor, -0.17, 0.1, 0.02, 0.24, 0.34, 0.3, "#26343e"),
+        box(actor, 0.17, 0.1, 0.02, 0.24, 0.34, 0.3, "#26343e"),
+      ]);
       box(actor, -0.17, -0.05, 0.13, 0.27, 0.12, 0.42, "#d3cbb1");
       box(actor, 0.17, -0.05, 0.13, 0.27, 0.12, 0.42, "#d3cbb1");
       box(actor, 0, 0.52, 0, 0.63, 0.66, 0.4, color);
       box(actor, 0, 0.81, 0.05, 0.2, 0.12, 0.31, "#e6dfc5");
+      const actorArms: THREE.Group[] = [];
       for (const side of [-1, 1]) {
-        box(actor, side * 0.4, 0.49, 0, 0.2, 0.42, 0.34, color);
-        box(actor, side * 0.4, 0.31, -0.07, 0.2, 0.16, 0.4, skin);
+        const arm = new THREE.Group();
+        arm.position.set(side * 0.4, 0.68, 0);
+        actor.add(arm);
+        actorArms.push(arm);
+        box(arm, 0, -0.19, 0, 0.2, 0.42, 0.34, color);
+        box(arm, 0, -0.37, -0.07, 0.2, 0.16, 0.4, skin);
       }
+      arms.push(actorArms);
       box(actor, 0, 1.13, 0, 0.63, 0.63, 0.54, skin);
       box(actor, 0, 1.47, -0.03, 0.69, 0.17, 0.59, hair);
       box(actor, -0.26, 1.27, 0, 0.18, 0.4, 0.57, hair);
@@ -182,15 +232,66 @@ export default function Office({ active, selected, eventId, motion, onSelect }: 
       box(room, -7.67, 0.36 + i * 0.3, -1, 0.05, 0.21, 2.3, "#617579");
       box(room, -7.62, 0.36 + i * 0.3, -0.25, 0.06, 0.07, 0.13, "#9ed7ad", true);
     }
-    const packet = box(room, 0, 0.4, 0, 0.25, 0.25, 0.25, "#e6ce8e", true);
-    packet.visible = false;
     let handoff: ReturnType<typeof animate> | null = null;
     let lastEvent = -1;
-    let lastActive: StationId | null = null;
+    let lastStation: StationId | null = null;
+    let moving = -1;
     let previousMotion = motion;
+    let queue: { id: number; station: StationId }[] = [];
     let frame = 0;
     let lastFrame = 0;
     let failed = false;
+    let visible = true;
+    const resetActors = () => {
+      handoff?.cancel();
+      handoff = null;
+      moving = -1;
+      actors.forEach((actor, index) => {
+        actor.position.set(positions[index][0], 0.2, positions[index][1] + 1.03);
+        actor.rotation.y = Math.PI;
+      });
+    };
+    const travel = (index: number, path: [number, number][], complete: () => void) => {
+      const point = path.shift();
+      if (!point) { complete(); return; }
+      const actor = actors[index];
+      const [x, z] = point;
+      const distance = Math.hypot(x - actor.position.x, z - actor.position.z);
+      actor.rotation.y = Math.atan2(x - actor.position.x, z - actor.position.z);
+      handoff = animate(actor.position, {
+        x, z, duration: Math.max(100, distance * 95), ease: "linear",
+        onComplete: () => travel(index, path, complete),
+      });
+    };
+    const nextHandoff = () => {
+      if (moving >= 0 || !queue.length) return;
+      const step = queue.shift()!;
+      if (!lastStation || step.station === lastStation) {
+        lastStation = step.station;
+        return;
+      }
+      const from = stations.findIndex(station => station.id === lastStation);
+      const to = stations.findIndex(station => station.id === step.station);
+      lastStation = step.station;
+      moving = from;
+      travel(from, [...aislePath(positions[from], positions[to]), ...aislePath(positions[to], positions[from])], () => {
+        actors[from].rotation.y = Math.PI;
+        moving = -1;
+        handoff = null;
+      });
+    };
+    const projectLabels = () => {
+      camera.updateMatrixWorld();
+      positions.forEach(([x, z], index) => {
+        const point = new THREE.Vector3(x, 0.12, z + 2.02).project(camera);
+        const label = labels.current[index];
+        if (label) {
+          label.style.left = `${(point.x * 0.5 + 0.5) * 100}%`;
+          label.style.top = `${(-point.y * 0.5 + 0.5) * 100}%`;
+          label.style.visibility = Math.abs(point.x) > 0.95 || Math.abs(point.y) > 0.88 ? "hidden" : "visible";
+        }
+      });
+    };
     const resize = () => {
       const width = host.clientWidth;
       const height = host.clientHeight;
@@ -203,49 +304,55 @@ export default function Office({ active, selected, eventId, motion, onSelect }: 
       camera.top = span / 2;
       camera.bottom = -span / 2;
       camera.updateProjectionMatrix();
-      camera.updateMatrixWorld();
-      positions.forEach(([x, z], index) => {
-        const point = new THREE.Vector3(x, 0.12, z + 2.02).project(camera);
-        const label = labels.current[index];
-        if (label) {
-          label.style.left = `${(point.x * 0.5 + 0.5) * 100}%`;
-          label.style.top = `${(-point.y * 0.5 + 0.5) * 100}%`;
-        }
-      });
+      projectLabels();
     };
     const observer = new ResizeObserver(resize);
     observer.observe(host);
     resize();
+    const visibility = new IntersectionObserver(entries => {
+      visible = entries[0]?.isIntersecting ?? false;
+      if (!visible) { resetActors(); queue = []; }
+    });
+    visibility.observe(host);
     function draw(time: number) {
       frame = requestAnimationFrame(draw);
-      if (document.hidden || failed || time - lastFrame < 33) return;
+      if (document.hidden || !visible || failed) {
+        resetActors();
+        queue = [];
+        lastEvent = current.current.events.at(-1)?.id ?? lastEvent;
+        return;
+      }
+      if (time - lastFrame < 33) return;
       lastFrame = time;
       const state = current.current;
-      if (previousMotion && !state.motion) {
-        handoff?.revert();
-        packet.visible = false;
-      }
+      if (previousMotion && !state.motion) { resetActors(); queue = []; cameraTween?.cancel(); }
       previousMotion = state.motion;
-      if (state.eventId !== lastEvent || state.active !== lastActive) {
-        lastEvent = state.eventId;
-        lastActive = state.active;
-        handoff?.cancel();
-        const index = stations.findIndex(station => station.id === state.active);
-        if (index >= 0 && state.motion && state.eventId > 0) {
-          packet.visible = true;
-          handoff = animate(packet.position, {
-            x: positions[index][0], z: positions[index][1] + 1,
-            duration: 850, ease: "inOutQuad", onComplete: () => { packet.visible = false; },
-          });
-        } else packet.visible = false;
+      if (!state.running || !state.motion) {
+        resetActors();
+        queue = [];
+        lastEvent = state.events.at(-1)?.id ?? lastEvent;
+        lastStation = state.active;
+      } else {
+        queue.push(...eventStops(state.events, lastEvent));
+        lastEvent = state.events.at(-1)?.id ?? lastEvent;
+        if (queue.length > 12) queue = queue.slice(-12);
+        nextHandoff();
       }
       actors.forEach((actor, index) => {
         const working = state.active === stations[index].id;
-        actor.position.y = 0.58 + (working && state.motion ? Math.sin(time * 0.012) * 0.035 : 0);
-        actor.rotation.y = working && state.motion ? Math.sin(time * 0.002) * 0.1 : 0;
+        const walking = index === moving && state.motion;
+        actor.position.y = 0.2 + (walking ? Math.abs(Math.sin(time * 0.017)) * 0.09 : 0);
+        legs[index].forEach((leg, side) => { leg.rotation.x = walking ? Math.sin(time * 0.017 + side * Math.PI) * 0.65 : 0; });
+        arms[index].forEach((arm, side) => {
+          arm.rotation.x = walking ? Math.sin(time * 0.017 + (1 - side) * Math.PI) * 0.6 : working && state.motion ? -0.4 + Math.sin(time * 0.012 + side) * 0.12 : 0;
+        });
+        if (!walking) actor.rotation.y = Math.PI;
         halos[index].visible = state.selected === stations[index].id || working;
         screens[index].material = material(working ? "#396b59" : "#223d42", working);
       });
+      projectLabels();
+      backWall.visible = camera.position.z >= -1;
+      sideWall.visible = camera.position.x >= -1;
       stars.forEach((star, index) => {
         star.position.x = Math.sin(index * 12.5) * 17 + (state.motion ? Math.sin(time * 0.00016 + index) * 0.6 : 0);
       });
@@ -255,13 +362,20 @@ export default function Office({ active, selected, eventId, motion, onSelect }: 
     const onLost = (event: Event) => {
       event.preventDefault();
       failed = true;
-      handoff?.cancel();
+      resetActors();
+      cameraTween?.cancel();
       setUnavailable(true);
     };
     renderer.domElement.addEventListener("webglcontextlost", onLost);
     return () => {
       cancelAnimationFrame(frame);
-      handoff?.revert();
+      resetActors();
+      cameraTween?.cancel();
+      controls.removeEventListener("start", onOrbit);
+      controls.dispose();
+      moveCamera.current = () => {};
+      zoomCamera.current = () => {};
+      visibility.disconnect();
       observer.disconnect();
       renderer.domElement.removeEventListener("webglcontextlost", onLost);
       geometry.dispose();
@@ -272,7 +386,12 @@ export default function Office({ active, selected, eventId, motion, onSelect }: 
   }, []);
 
   return <div className={`office ${unavailable ? "office-unavailable" : ""}`}>
-    <div ref={mount} className="office-canvas" aria-hidden="true" />
+    <div ref={mount} className="office-canvas" role="group" aria-label="3D evaluation floor. Drag to rotate; scroll or pinch to zoom." />
+    {!unavailable && <div className="camera-toolbar" aria-label="Office camera controls">
+      <div className="camera-presets">{(Object.keys(cameraViews) as CameraView[]).map(view => <button key={view} aria-pressed={cameraView === view} onClick={() => { setCameraView(view); moveCamera.current(view); }}>{view === "Orbit" ? "Reset view" : view}</button>)}</div>
+      <div className="camera-zoom"><button aria-label="Zoom out" onClick={() => zoomCamera.current(1 / 1.2)}>−</button><button aria-label="Zoom in" onClick={() => zoomCamera.current(1.2)}>+</button></div>
+      <small>Drag to rotate · Scroll or pinch to zoom</small>
+    </div>}
     {unavailable && <p className="office-fallback">3D view unavailable. Select a station below.</p>}
     <div className="office-labels" aria-label="Evaluation stations">
       {stations.map((station, index) => <button key={station.id} ref={element => { labels.current[index] = element; }}
