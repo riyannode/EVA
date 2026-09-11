@@ -1,6 +1,9 @@
 import asyncio
+import hashlib
 import json
+import secrets
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 from urllib.parse import urlparse
@@ -17,7 +20,7 @@ import graph
 import journal
 from limits import RateLimiter
 from config import Config, load_config
-from models import Agent, AgentCreate, AgentRegistration, AgentStatus, EvaluationMetrics, Mode, Policy, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
+from models import Agent, AgentCreate, AgentRegistration, AgentStatus, EvaluationMetrics, Mode, PairingRequest, PairingRequestCreate, Policy, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
 from provider import ProviderError
 from providers import instrument_ready, paper_order_contract_ready, provider_for, provider_result, structured_result
 from score import metrics, paper_verification, score
@@ -54,14 +57,17 @@ def _paper_provider(payload: RunCreate) -> RunCreate:
     return payload.model_copy(update={"execution_provider": provider_id})
 
 
-def _onboarding_evaluation() -> dict[str, object]:
+def _onboarding_evaluation(agent: Agent) -> dict[str, object]:
     try:
         adapter = provider_for(CONFIG)
     except ProviderError:
-        return {"synthetic": "READY", "paper": "NOT_SUPPORTED_YET", "execution_provider": CONFIG.execution_provider, "provider_capabilities": []}
+        return {"synthetic": "READY", "paper": "NOT_SUPPORTED", "execution_provider": None, "provider_capabilities": []}
     capabilities = _provider_capabilities(adapter)
-    paper = "READY" if CONFIG.bitget_mode == "paper" and "paper_order" in capabilities else "NOT_SUPPORTED_YET"
-    return {"synthetic": "READY", "paper": paper, "execution_provider": _provider_id(adapter), "provider_capabilities": capabilities}
+    provider_id = _provider_id(adapter)
+    declared = {item.lower() for item in agent.execution_providers}
+    supported = provider_id.lower() in declared
+    paper = "READY" if supported and CONFIG.bitget_mode == "paper" and "paper_order" in capabilities else "NOT_SUPPORTED"
+    return {"synthetic": "READY", "paper": paper, "execution_provider": provider_id if supported else None, "provider_capabilities": capabilities}
 
 
 def _limit(request: Request, bucket: str, limit: int, window: float) -> None:
@@ -75,6 +81,25 @@ def _run(run_id: str) -> Run:
         return db.get_run(DB_PATH, run_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="RUN_NOT_FOUND") from error
+
+
+def _pairing_url(request_id: str) -> str:
+    return f"{CONFIG.public_api_url.rstrip('/')}/v1/pairing-requests/{request_id}"
+
+
+def _pairing(request_id: str) -> PairingRequest:
+    try:
+        return db.get_pairing(DB_PATH, request_id, _pairing_url(request_id))
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="PAIRING_NOT_FOUND") from error
+
+
+def _share_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _legacy_demo(payload: RunCreate) -> bool:
+    return payload.mode == Mode.SYNTHETIC and payload.target_id in {"REFERENCE_SAFE", "REFERENCE_WEAK"} and not payload.agent_id and not payload.target_url and not payload.target_token
 
 
 async def _execute(run_id: str) -> None:
@@ -98,6 +123,11 @@ def _schedule(run_id: str) -> None:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/.well-known/eva-signing-keys.json")
+def signing_keys() -> dict[str, object]:
+    return {"version": "eva-signing-keys/1", "keys": CONFIG.certificate_trusted_keys}
 
 
 @app.get("/verification/preflight")
@@ -194,7 +224,59 @@ def read_agent(request: Request, agent_id: str) -> Agent:
 @app.get("/v1/agents/{agent_id}/onboarding")
 def agent_onboarding(request: Request, agent_id: str) -> dict[str, object]:
     agent = auth.require_agent_access(request, CONFIG, DB_PATH, agent_id)
-    return {"agent_id": agent.agent_id, "protocol": agent.protocol_version, "gateway_path": "/v1/agent/connect", "evaluation": _onboarding_evaluation(), "methods": [{"id": "ai-agent", "name": "AI Agent", "command": "Use the setup prompt with your coding agent."}, {"id": "cli", "name": "CLI", "command": "npx @eva-ai/cli onboard --api-url <EVA_API_URL> --control-token <CONTROL_PLANE_TOKEN> --name <AGENT_NAME> --version <VERSION> --model <MODEL> --json"}, {"id": "typescript", "name": "TypeScript", "command": "npm install @eva-ai/sdk"}, {"id": "python", "name": "Python", "command": "pip install eva-agent"}, {"id": "manual", "name": "Manual", "command": "Follow docs/protocol.md."}], "prompt": f"Register {agent.name} with EVA using agent_id {agent.agent_id}. Set EVA_API_KEY and EVA_AGENT_ID in the runtime environment, connect outbound to /v1/agent/connect with protocol eva-agent/1, and report the ONLINE status. Run only SYNTHETIC evaluation during setup."}
+    return {"agent_id": agent.agent_id, "protocol": agent.protocol_version, "gateway_path": "/v1/agent/connect", "evaluation": _onboarding_evaluation(agent), "methods": [{"id": "ai-agent", "name": "AI Agent", "command": "Use the setup prompt with your coding agent."}, {"id": "cli", "name": "CLI", "command": "eva auth start --api-url <EVA_API_URL> --name <AGENT_NAME> --version <VERSION> --model <MODEL> --json"}, {"id": "typescript", "name": "TypeScript", "command": "npm install @eva-ai/sdk"}, {"id": "python", "name": "Python", "command": "pip install eva-agent"}, {"id": "raw", "name": "Raw Protocol", "command": "Follow docs/protocol.md."}], "prompt": f"Connect my existing trading agent to EVA. Pairing request: use the approved request ID. Use the EVA CLI or SDK, check pairing status, store the returned agent credential in the runtime environment, connect outbound using eva-agent/1, run the non-financial connection test, and stop before PAPER evaluation."}
+
+
+@app.post("/v1/pairing-requests", response_model=PairingRequest, status_code=201)
+def create_pairing_request(request: Request, payload: PairingRequestCreate) -> PairingRequest:
+    _limit(request, "pairing-create", 10, 3600)
+    request_id = auth.issue_id("pair")
+    expires_at = db.now() + timedelta(minutes=10)
+    return db.create_pairing(DB_PATH, request_id, payload, expires_at, _pairing_url(request_id))
+
+
+@app.get("/v1/pairing-requests/{request_id}", response_model=PairingRequest)
+def pairing_status(request: Request, request_id: str) -> PairingRequest:
+    _limit(request, "pairing-status", 120, 60)
+    return _pairing(request_id)
+
+
+@app.post("/v1/pairing-requests/{request_id}/approve", response_model=PairingRequest)
+def approve_pairing(request: Request, request_id: str) -> PairingRequest:
+    _limit(request, "pairing-approve", 30, 60)
+    auth.require_control_plane(request, CONFIG)
+    try:
+        db.approve_pairing(DB_PATH, request_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="PAIRING_NOT_FOUND") from error
+    except ValueError as error:
+        code = str(error)
+        raise HTTPException(status_code=410 if code == "PAIRING_EXPIRED" else 409, detail=code) from error
+    return _pairing(request_id)
+
+
+@app.post("/v1/pairing-requests/{request_id}/exchange", response_model=AgentRegistration)
+def exchange_pairing(request: Request, request_id: str) -> AgentRegistration:
+    _limit(request, "pairing-exchange", 30, 600)
+    status = _pairing(request_id)
+    if status.status == "PENDING":
+        raise HTTPException(status_code=409, detail="PAIRING_PENDING")
+    if status.status == "EXPIRED":
+        raise HTTPException(status_code=410, detail="PAIRING_EXPIRED")
+    if status.status == "EXCHANGED":
+        raise HTTPException(status_code=409, detail="PAIRING_ALREADY_EXCHANGED")
+    api_key, key_salt, key_hash = auth.issue_agent_key()
+    agent_id = auth.issue_id("agt")
+    key_id = auth.issue_id("key")
+    try:
+        agent = db.exchange_pairing(DB_PATH, request_id, CONFIG.control_plane_owner_id, agent_id, key_id, key_hash, key_salt)
+        key = db.get_agent_key(DB_PATH, agent_id, key_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="PAIRING_NOT_FOUND") from error
+    except ValueError as error:
+        code = str(error)
+        raise HTTPException(status_code=410 if code == "PAIRING_EXPIRED" else 409, detail=code) from error
+    return AgentRegistration(agent=agent, key=key, api_key=api_key)
 
 
 @app.post("/v1/agents/{agent_id}/keys", response_model=AgentRegistration, status_code=201)
@@ -229,7 +311,7 @@ async def agent_connect(websocket: WebSocket) -> None:
         return
     try:
         hello = await asyncio.wait_for(websocket.receive_json(), 10)
-        if len(json.dumps(hello, separators=(",", ":"))) > 65536:
+        if len(json.dumps(hello, separators=(",", ":"))) > CONFIG.gateway_message_bytes:
             await websocket.close(code=4400)
             return
         agent_id = hello.get("agent_id") if isinstance(hello, dict) else None
@@ -250,7 +332,7 @@ async def agent_connect(websocket: WebSocket) -> None:
             await websocket.close(code=4400)
             return
         try:
-            session = gateway.registry.connect(agent_id, gateway.connection_id())
+            session = gateway.registry.connect(agent_id, gateway.connection_id(), CONFIG)
         except gateway.GatewayError:
             await websocket.close(code=4429)
             return
@@ -259,9 +341,9 @@ async def agent_connect(websocket: WebSocket) -> None:
         writer = asyncio.create_task(_write_gateway_messages(websocket, session))
         while True:
             try:
-                message = await asyncio.wait_for(websocket.receive_json(), 30)
+                message = await asyncio.wait_for(websocket.receive_json(), CONFIG.gateway_heartbeat_seconds)
             except asyncio.TimeoutError:
-                if session.expired(60):
+                if session.expired(CONFIG.gateway_heartbeat_seconds * 2) or session.duration_expired():
                     await websocket.close(code=4408)
                     return
                 session.send({"type": "ping", "nonce": uuid4().hex})
@@ -345,6 +427,15 @@ def evaluation_journal(request: Request, evaluation_id: str) -> dict[str, object
     return {"evaluation_id": run.id, "evidence_root": run.evidence_root, "valid": journal.verify_entries(entries, run.evidence_root), "entries": entries}
 
 
+@app.get("/v1/evaluations/{evaluation_id}/bundle")
+def evaluation_bundle(request: Request, evaluation_id: str) -> dict[str, object]:
+    run = _authorized_evaluation(request, evaluation_id)
+    certificate_value = _certificate_for(run)
+    episodes = db.get_episodes(DB_PATH, run.id)
+    entries = [journal.event_entry(item) for item in db.get_events(DB_PATH, run.id)]
+    return {"evaluation": run.model_dump(mode="json"), "episodes": [item.model_dump(mode="json") for item in episodes], "journal": entries, "certificate": certificate_value, "weaknesses": [item.model_dump(mode="json") for item in db.get_weaknesses(DB_PATH, run.target_id, run.target_version)], "metrics": metrics(episodes).model_dump(mode="json")}
+
+
 @app.get("/v1/agents/{agent_id}/evaluations", response_model=list[Run])
 def agent_evaluations(request: Request, agent_id: str) -> list[Run]:
     _limit(request, "evaluation-history", 120, 60)
@@ -411,21 +502,46 @@ def read_certificate(request: Request, evaluation_id: str) -> dict[str, object]:
 def verify_certificate(request: Request, evaluation_id: str) -> dict[str, object]:
     run = _authorized_evaluation(request, evaluation_id)
     value = _certificate_for(run)
-    return {"evaluation_id": evaluation_id, "valid": certificate.verify(value, run.evidence_root), "signing_key_id": value.get("signing_key_id")}
+    return {"evaluation_id": evaluation_id, "valid": certificate.verify(value, run.evidence_root, CONFIG.certificate_trusted_keys), "signing_key_id": value.get("signing_key_id")}
+
+
+@app.post("/v1/certificates/{evaluation_id}/share")
+def share_certificate(request: Request, evaluation_id: str) -> dict[str, object]:
+    _limit(request, "certificate-share", 30, 60)
+    run = _authorized_evaluation(request, evaluation_id)
+    value = _certificate_for(run)
+    token = f"eva_share_{secrets.token_urlsafe(32)}"
+    db.create_share(DB_PATH, run.id, _share_hash(token))
+    return {"share_token": token, "share_url": f"{CONFIG.public_api_url.rstrip('/')}/v1/public/certificates/{token}", "certificate": value, "verification": {"valid": certificate.verify(value, run.evidence_root, CONFIG.certificate_trusted_keys), "signing_key_id": value.get("signing_key_id")}}
+
+
+@app.get("/v1/public/certificates/{share_token}")
+def public_certificate(request: Request, share_token: str) -> dict[str, object]:
+    _limit(request, "certificate-public", 120, 60)
+    try:
+        evaluation_id = db.shared_evaluation(DB_PATH, _share_hash(share_token))
+        value = db.get_certificate(DB_PATH, evaluation_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="SHARE_NOT_FOUND") from error
+    if not value:
+        raise HTTPException(status_code=404, detail="CERTIFICATE_NOT_FOUND")
+    return {"certificate": value, "verification": {"valid": certificate.verify(value, str(value.get("evidence_root")), CONFIG.certificate_trusted_keys), "signing_key_id": value.get("signing_key_id")}}
 
 
 @app.post("/runs", response_model=Run, status_code=201)
-async def create_run(request: RunCreate) -> Run:
-    if request.mode not in {Mode.SYNTHETIC, Mode.PAPER, Mode.BITGET_PAPER}:
+async def create_run(request: Request, payload: RunCreate) -> Run:
+    if payload.mode not in {Mode.SYNTHETIC, Mode.PAPER, Mode.BITGET_PAPER}:
         raise HTTPException(status_code=422, detail="INVALID_MODE")
-    if request.target_id == "EXTERNAL_HTTP" and not request.target_url:
+    if payload.target_id == "EXTERNAL_HTTP" and not payload.target_url:
         raise HTTPException(status_code=422, detail="TARGET_URL_REQUIRED")
-    if request.target_url and urlparse(request.target_url).scheme not in {"http", "https"}:
+    if payload.target_url and urlparse(payload.target_url).scheme not in {"http", "https"}:
         raise HTTPException(status_code=422, detail="INVALID_TARGET_URL")
-    request = _paper_provider(request)
-    run = db.create_run(DB_PATH, request)
-    REQUESTS[run.id] = request
-    graph.set_target(run.id, request.target_url, request.target_token)
+    if not _legacy_demo(payload):
+        auth.require_control_plane(request, CONFIG)
+    payload = _paper_provider(payload)
+    run = db.create_run(DB_PATH, payload)
+    REQUESTS[run.id] = payload
+    graph.set_target(run.id, payload.target_url, payload.target_token)
     db.add_event(DB_PATH, run.id, "RUN_CREATED", {"target_id": run.target_id, "target_name": run.target_name, "target_version": run.target_version, "target_model": run.target_model, "mode": run.mode.value, "max_episodes": run.max_episodes})
     _schedule(run.id)
     return run
@@ -491,8 +607,9 @@ async def events(run_id: str):
 
 
 @app.post("/runs/{run_id}/stop", response_model=Run)
-def stop(run_id: str) -> Run:
+def stop(request: Request, run_id: str) -> Run:
     run = _run(run_id)
+    auth.require_legacy_run_access(request, CONFIG, DB_PATH, run)
     if run.status in {RunStatus.COMPLETED, RunStatus.STOPPED, RunStatus.FAILED}:
         return run
     db.request_stop(DB_PATH, run_id)
@@ -500,8 +617,9 @@ def stop(run_id: str) -> Run:
 
 
 @app.post("/runs/{run_id}/resume", response_model=Run)
-def resume(run_id: str) -> Run:
+def resume(request: Request, run_id: str) -> Run:
     run = _run(run_id)
+    auth.require_legacy_run_access(request, CONFIG, DB_PATH, run)
     if run.status not in {RunStatus.STOPPED, RunStatus.FAILED}:
         raise HTTPException(status_code=409, detail="RUN_NOT_RESUMABLE")
     request = REQUESTS.get(run_id)

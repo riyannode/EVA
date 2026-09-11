@@ -16,6 +16,8 @@ class CertificateError(RuntimeError):
 def issue(config: Config, evaluation_id: str, agent_id: str, agent: dict[str, str], score: int, readiness: str, primary_weakness: str | None, evidence_root: str, completed_at: str, execution_provider: str | None) -> dict[str, object]:
     private_key = _private_key(config)
     public_key = _encode(private_key.public_key().public_bytes_raw())
+    if config.certificate_trusted_keys.get(config.certificate_key_id) != public_key:
+        raise CertificateError("CERTIFICATE_TRUST_UNCONFIGURED")
     model = Certificate.model_validate({"certificate_version": "eva-cert/1", "evaluation_id": evaluation_id, "agent_id": agent_id, "agent": agent, "score": score, "readiness": readiness, "primary_weakness": primary_weakness, "evidence_root": evidence_root, "completed_at": completed_at, "execution_provider": execution_provider, "signing_key_id": config.certificate_key_id, "public_key": public_key, "signature": ""})
     signable = model.model_dump(mode="json")
     signable.pop("signature")
@@ -23,14 +25,16 @@ def issue(config: Config, evaluation_id: str, agent_id: str, agent: dict[str, st
     return Certificate.model_validate({**signable, "signature": signature}).model_dump(mode="json")
 
 
-def verify(value: dict[str, object], expected_evidence_root: str | None = None) -> bool:
+def verify(value: dict[str, object], expected_evidence_root: str | None = None, trusted_keys: dict[str, str] | None = None) -> bool:
     try:
         certificate = Certificate.model_validate(value)
+        if not trusted_keys or certificate.signing_key_id not in trusted_keys:
+            return False
         if expected_evidence_root and certificate.evidence_root != expected_evidence_root:
             return False
         signable = certificate.model_dump(mode="json")
         signature = _decode(str(signable.pop("signature")))
-        public_key = Ed25519PublicKey.from_public_bytes(_decode(certificate.public_key))
+        public_key = Ed25519PublicKey.from_public_bytes(_decode(trusted_keys[certificate.signing_key_id]))
         public_key.verify(signature, canonical_json(signable))
         return True
     except (ValueError, TypeError, InvalidSignature, binascii.Error):

@@ -18,11 +18,15 @@ class GatewayError(RuntimeError):
 class Session:
     agent_id: str
     connection_id: str
-    inbound: Queue[dict[str, Any]] = field(default_factory=Queue)
+    inbound: Queue[dict[str, Any]] = field(default_factory=lambda: Queue(maxsize=32))
     outbound: Queue[dict[str, Any]] = field(default_factory=lambda: Queue(maxsize=32))
+    max_message_bytes: int = 65536
+    session_seconds: float = 900
     evaluation_active: bool = False
     closed: bool = False
     last_seen: float = field(default_factory=time.monotonic)
+    connected_at: float = field(default_factory=time.monotonic)
+    close_reason: str | None = None
 
     def touch(self) -> None:
         self.last_seen = time.monotonic()
@@ -30,12 +34,33 @@ class Session:
     def expired(self, timeout: float) -> bool:
         return time.monotonic() - self.last_seen > timeout
 
+    def duration_expired(self) -> bool:
+        return time.monotonic() - self.connected_at > self.session_seconds
+
+    def close(self, reason: str = "CLIENT_DISCONNECT") -> None:
+        self.closed = True
+        self.close_reason = self.close_reason or reason
+        while True:
+            try:
+                self.inbound.get_nowait()
+            except Empty:
+                break
+        while True:
+            try:
+                self.outbound.get_nowait()
+            except Empty:
+                break
+
     def send(self, message: dict[str, Any]) -> None:
         if self.closed:
             raise GatewayError("AGENT_OFFLINE")
+        if len(json.dumps(message, separators=(",", ":"))) > self.max_message_bytes:
+            self.close("MESSAGE_TOO_LARGE")
+            raise GatewayError("MESSAGE_TOO_LARGE")
         try:
-            self.outbound.put(message, timeout=1)
+            self.outbound.put_nowait(message)
         except Full as error:
+            self.close("GATEWAY_BACKPRESSURE")
             raise GatewayError("GATEWAY_BACKPRESSURE") from error
 
     def receive(self, timeout: float) -> dict[str, Any]:
@@ -55,18 +80,22 @@ class GatewayRegistry:
         self._sessions: dict[str, Session] = {}
         self._lock = Lock()
 
-    def connect(self, agent_id: str, connection_id: str) -> Session:
+    def connect(self, agent_id: str, connection_id: str, config: Config | None = None) -> Session:
         with self._lock:
             previous = self._sessions.get(agent_id)
             if previous and not previous.closed:
                 raise GatewayError("AGENT_ALREADY_CONNECTED")
-            session = Session(agent_id=agent_id, connection_id=connection_id)
+            inbound = config.gateway_inbound_queue_size if config else 32
+            outbound = config.gateway_outbound_queue_size if config else 32
+            max_message_bytes = config.gateway_message_bytes if config else 65536
+            session_seconds = config.gateway_session_seconds if config else 900
+            session = Session(agent_id=agent_id, connection_id=connection_id, inbound=Queue(maxsize=inbound), outbound=Queue(maxsize=outbound), max_message_bytes=max_message_bytes, session_seconds=session_seconds)
             self._sessions[agent_id] = session
             return session
 
     def disconnect(self, session: Session) -> None:
         with self._lock:
-            session.closed = True
+            session.close()
             if self._sessions.get(session.agent_id) is session:
                 self._sessions.pop(session.agent_id, None)
 
@@ -113,7 +142,8 @@ def ready_message(session: Session) -> dict[str, str]:
 def handle_client_message(session: Session, message: object) -> dict[str, Any] | None:
     if not isinstance(message, dict):
         raise GatewayError("INVALID_MESSAGE")
-    if len(json.dumps(message, separators=(",", ":"))) > 65536:
+    if len(json.dumps(message, separators=(",", ":"))) > session.max_message_bytes:
+        session.close("MESSAGE_TOO_LARGE")
         raise GatewayError("MESSAGE_TOO_LARGE")
     session.touch()
     message_type = message.get("type")
@@ -124,7 +154,11 @@ def handle_client_message(session: Session, message: object) -> dict[str, Any] |
         return response
     if message_type == "pong":
         return None
-    session.inbound.put(message)
+    try:
+        session.inbound.put_nowait(message)
+    except Full as error:
+        session.close("GATEWAY_BACKPRESSURE")
+        raise GatewayError("GATEWAY_BACKPRESSURE") from error
     return None
 
 

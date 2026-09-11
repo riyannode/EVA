@@ -10,7 +10,7 @@ FastAPI owns the small HTTP surface and schedules one in-process benchmark task.
 
 Qwen is an optional OpenAI-compatible transport used only by scenario generation, qualitative critique, and mutation. Missing or invalid model output has an explicit fallback and never changes deterministic oracle results. The reference targets make the demo runnable without an external target. External targets use the stateless HTTP contract from the PRD.
 
-The frontend is one flat React view. It switches between `SYNTHETIC` and the legacy-compatible `BITGET_PAPER` flow, starts and stops runs, subscribes to SSE events with polling fallback, and renders run evidence. The Connect External Agent dialog registers a venue-neutral identity, shows the one-time key, presents SDK/CLI/manual methods, reports `ONLINE` and `SYNTHETIC_READY`, and starts a gateway synthetic evaluation after the agent connects.
+The frontend keeps the existing Observatory and Analysis views and adds a minimal Agents view. Observatory switches between `SYNTHETIC` and the legacy-compatible `BITGET_PAPER` flow, starts and stops runs, subscribes to SSE events with polling fallback, and renders run evidence. Agents creates a short-lived pairing request without a control-plane credential, reports `ONLINE` and synthetic readiness after the outbound gateway connects, presents AI-agent, CLI, SDK, and raw-protocol methods, and starts a gateway synthetic evaluation.
 
 ## Safety decisions
 

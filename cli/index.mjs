@@ -4,19 +4,41 @@ const flags = parseFlags(args.slice(1));
 const jsonOutput = Boolean(flags.json);
 
 async function main() {
-  if (command === "onboard" || command === "agent") {
-    if (command === "agent" && args[1] !== "register") return fail("COMMAND_REQUIRED");
-    return register();
-  }
+  if (command === "onboard") return pairingStart();
+  if (command === "agent" && args[1] === "register") return pairingStart();
+  if (command === "auth" && args[1] === "start") return pairingStart();
+  if (command === "auth" && args[1] === "status") return pairingStatus();
+  if (command === "auth" && args[1] === "complete") return pairingComplete();
+  if (command === "admin" && args[1] === "approve") return approvePairing();
   if (command === "evaluation" && args[1] === "get") return request(`/v1/evaluations/${required("id")}`, "GET");
   if (command === "evaluation" && args[1] === "watch") return watch();
   if (command === "certificate" && args[1] === "verify") return verifyCertificate();
   return fail("COMMAND_REQUIRED");
 }
 
-async function register() {
+async function pairingStart() {
   const base = required("api-url").replace(/\/$/, "");
-  const response = await fetch(`${base}/v1/agents`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${required("control-token")}` }, body: JSON.stringify({ name: required("name"), version: required("version"), declared_model: required("model"), framework: flags.framework, execution_providers: flags.providers ? String(flags.providers).split(",") : [] }) });
+  const response = await fetch(`${base}/v1/pairing-requests`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: required("name"), version: required("version"), declared_model: required("model"), framework: flags.framework, execution_providers: flags.providers ? String(flags.providers).split(",") : [] }) });
+  return output(await decode(response));
+}
+
+async function pairingStatus() {
+  const base = required("api-url").replace(/\/$/, "");
+  return output(await decode(await fetch(`${base}/v1/pairing-requests/${encodeURIComponent(required("request-id"))}`)));
+}
+
+async function pairingComplete() {
+  const base = required("api-url").replace(/\/$/, "");
+  const response = await fetch(`${base}/v1/pairing-requests/${encodeURIComponent(required("request-id"))}/exchange`, { method: "POST" });
+  const value = await response.json();
+  if (response.status === 409 && value.detail === "PAIRING_PENDING") return output({ status: "PENDING" });
+  if (!response.ok) return fail(value.detail ?? "REQUEST_FAILED", response.status);
+  return output({ ...value, status: "APPROVED", agent_id: value.agent?.agent_id });
+}
+
+async function approvePairing() {
+  const base = required("api-url").replace(/\/$/, "");
+  const response = await fetch(`${base}/v1/pairing-requests/${encodeURIComponent(required("request-id"))}/approve`, { method: "POST", headers: { Authorization: `Bearer ${required("control-token")}` } });
   return output(await decode(response));
 }
 
@@ -39,11 +61,32 @@ async function watch() {
 
 async function verifyCertificate() {
   const value = JSON.parse(await import("node:fs/promises").then(module => module.readFile(required("file"), "utf8")));
+  const trusted = await loadTrustedKeys();
   const signable = { ...value };
   delete signable.signature;
-  const key = await crypto.subtle.importKey("raw", decodeBase64(value.public_key), { name: "Ed25519" }, false, ["verify"]);
-  const valid = await crypto.subtle.verify({ name: "Ed25519" }, key, decodeBase64(value.signature), new TextEncoder().encode(stableJson(signable)));
+  const publicKey = trusted[value.signing_key_id];
+  let valid = false;
+  if (publicKey) {
+    const key = await crypto.subtle.importKey("raw", decodeBase64(publicKey), { name: "Ed25519" }, false, ["verify"]);
+    valid = await crypto.subtle.verify({ name: "Ed25519" }, key, decodeBase64(value.signature), new TextEncoder().encode(stableJson(signable)));
+  }
   return output({ valid, signing_key_id: value.signing_key_id, evaluation_id: value.evaluation_id });
+}
+
+async function loadTrustedKeys() {
+  if (flags["trusted-key-file"]) {
+    const source = JSON.parse(await import("node:fs/promises").then(module => module.readFile(String(flags["trusted-key-file"]), "utf8")));
+    const value = source.keys ?? source;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return fail("INVALID_TRUSTED_KEY_FILE");
+    return value;
+  }
+  if (flags["api-url"]) {
+    const base = String(flags["api-url"]).replace(/\/$/, "");
+    const response = await fetch(`${base}/.well-known/eva-signing-keys.json`);
+    const source = await decode(response);
+    return source.keys ?? {};
+  }
+  return fail("TRUSTED_KEY_SOURCE_REQUIRED");
 }
 
 function parseFlags(values) {

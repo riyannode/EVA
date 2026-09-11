@@ -1,6 +1,8 @@
 import json
+import http.client
 import ipaddress
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -30,6 +32,32 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+@dataclass(frozen=True)
+class _ResolvedTarget:
+    hostname: str
+    address: str
+    port: int
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, address: str, **kwargs) -> None:
+        super().__init__(host, **kwargs)
+        self._validated_address = address
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._validated_address, self.port), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, resolved: _ResolvedTarget) -> None:
+        super().__init__(context=ssl.create_default_context())
+        self._resolved = resolved
+
+    def https_open(self, request):
+        return self.do_open(lambda host, **kwargs: _PinnedHTTPSConnection(host, self._resolved.address, **kwargs), request)
+
+
 def register_target(run_id: str, url: str | None, token: str | None) -> None:
     _TARGETS[run_id] = (url, token)
 
@@ -57,16 +85,21 @@ def reference_target(target_id: str, scenario: Scenario) -> TargetResult:
 
 
 def _http(url: str, payload: dict[str, object], token: str | None, config: Config) -> dict[str, object]:
-    _validate_target(url)
+    resolved = _validate_target(url)
     encoded = json.dumps(payload, separators=(",", ":")).encode()
     request = urllib.request.Request(url, data=encoded, headers={"Content-Type": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})}, method="POST")
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=config.target_timeout_ms / 1000) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), _PinnedHTTPSHandler(resolved))
+        with opener.open(request, timeout=config.target_timeout_ms / 1000) as response:
             body = response.read(config.target_response_bytes + 1)
     except TimeoutError as error:
         raise RuntimeError("TARGET_TIMEOUT") from error
     except urllib.error.URLError as error:
         if isinstance(error.reason, TimeoutError):
+            raise RuntimeError("TARGET_TIMEOUT") from error
+        raise RuntimeError("TARGET_ERROR") from error
+    except OSError as error:
+        if isinstance(error, TimeoutError):
             raise RuntimeError("TARGET_TIMEOUT") from error
         raise RuntimeError("TARGET_ERROR") from error
     if len(body) > config.target_response_bytes:
@@ -77,19 +110,26 @@ def _http(url: str, payload: dict[str, object], token: str | None, config: Confi
     return parsed
 
 
-def _validate_target(url: str) -> None:
+def _validate_target(url: str) -> _ResolvedTarget:
     parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in {None, 443}:
+    try:
+        port = parsed.port or 443
+    except ValueError as error:
+        raise RuntimeError("TARGET_NOT_ALLOWED") from error
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or port != 443:
         raise RuntimeError("TARGET_NOT_ALLOWED")
     hostname = parsed.hostname.rstrip(".").lower()
     if hostname in {"localhost", "metadata.google.internal", "metadata.azure.internal"} or hostname.endswith(".localhost"):
         raise RuntimeError("TARGET_NOT_ALLOWED")
     try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)}
+        addresses = [str(ipaddress.ip_address(item[4][0])) for item in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)]
     except socket.gaierror as error:
         raise RuntimeError("TARGET_UNRESOLVED") from error
+    except ValueError as error:
+        raise RuntimeError("TARGET_NOT_ALLOWED") from error
     if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
         raise RuntimeError("TARGET_NOT_ALLOWED")
+    return _ResolvedTarget(hostname=hostname, address=addresses[0], port=port)
 
 
 def _tool_result(name: str, args: dict[str, object], scenario: Scenario, mode: Mode, adapter: ExecutionProvider | None, market_results: dict[str, dict[str, object]] | None = None, account_result: dict[str, object] | None = None, instrument_results: dict[str, dict[str, object]] | None = None) -> dict[str, object]:

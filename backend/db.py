@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from models import Agent, AgentCapabilityState, AgentCreate, AgentKey, AgentStatus, CriticResult, Decision, Episode, Event, Mode, OracleResult, Run, RunCreate, RunStatus, Scenario, TargetListing, ToolTrace, Weakness
+from models import Agent, AgentCapabilityState, AgentCreate, AgentKey, AgentStatus, CriticResult, Decision, Episode, Event, Mode, OracleResult, PairingRequest, PairingRequestCreate, Run, RunCreate, RunStatus, Scenario, TargetListing, ToolTrace, Weakness
 from journal import ZERO_HASH, canonical_entry, hash_entry
 
 
@@ -169,6 +169,28 @@ def init_db(path: Path) -> None:
             CREATE TABLE IF NOT EXISTS certificates (
                 evaluation_id TEXT PRIMARY KEY REFERENCES runs(id),
                 certificate_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pairing_requests (
+                request_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                declared_model TEXT NOT NULL,
+                framework TEXT,
+                protocol_version TEXT NOT NULL,
+                capabilities_json TEXT NOT NULL,
+                execution_providers_json TEXT NOT NULL,
+                provider_capabilities_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                approved_at TEXT,
+                exchanged_at TEXT,
+                agent_id TEXT REFERENCES agents(agent_id)
+            );
+            CREATE TABLE IF NOT EXISTS certificate_shares (
+                share_token_hash TEXT PRIMARY KEY,
+                evaluation_id TEXT NOT NULL REFERENCES certificates(evaluation_id),
                 created_at TEXT NOT NULL
             );
             """
@@ -515,3 +537,76 @@ def get_certificate(path: Path, evaluation_id: str) -> dict[str, object] | None:
 def save_certificate(path: Path, evaluation_id: str, certificate: dict[str, object]) -> None:
     with _session(path) as connection:
         connection.execute("INSERT OR REPLACE INTO certificates (evaluation_id, certificate_json, created_at) VALUES (?, ?, ?)", (evaluation_id, _text(certificate), now().isoformat()))
+
+
+def create_pairing(path: Path, request_id: str, request: PairingRequestCreate, expires_at: datetime, approval_url: str) -> PairingRequest:
+    created = now()
+    with _session(path) as connection:
+        connection.execute(
+            "INSERT INTO pairing_requests (request_id, name, version, declared_model, framework, protocol_version, capabilities_json, execution_providers_json, provider_capabilities_json, status, created_at, expires_at, approved_at, exchanged_at, agent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (request_id, request.name, request.version, request.declared_model, request.framework, request.protocol_version, _text(request.capabilities), _text(request.execution_providers), _text(request.provider_capabilities), "PENDING", created.isoformat(), expires_at.isoformat(), None, None, None),
+        )
+    return get_pairing(path, request_id, approval_url)
+
+
+def _pairing(row: sqlite3.Row, approval_url: str) -> PairingRequest:
+    return PairingRequest(request_id=row["request_id"], status=row["status"], expires_at=datetime.fromisoformat(row["expires_at"]), approval_url=approval_url, agent_id=row["agent_id"])
+
+
+def get_pairing(path: Path, request_id: str, approval_url: str) -> PairingRequest:
+    with _session(path) as connection:
+        row = connection.execute("SELECT * FROM pairing_requests WHERE request_id = ?", (request_id,)).fetchone()
+        if row is None:
+            raise KeyError("PAIRING_NOT_FOUND")
+        if row["status"] == "PENDING" and datetime.fromisoformat(row["expires_at"]) <= now():
+            connection.execute("UPDATE pairing_requests SET status = ? WHERE request_id = ?", ("EXPIRED", request_id))
+            row = connection.execute("SELECT * FROM pairing_requests WHERE request_id = ?", (request_id,)).fetchone()
+    return _pairing(row, approval_url)
+
+
+def approve_pairing(path: Path, request_id: str) -> None:
+    with _session(path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT status, expires_at FROM pairing_requests WHERE request_id = ?", (request_id,)).fetchone()
+        if row is None:
+            raise KeyError("PAIRING_NOT_FOUND")
+        if row["status"] != "PENDING":
+            raise ValueError("PAIRING_NOT_PENDING")
+        if datetime.fromisoformat(row["expires_at"]) <= now():
+            connection.execute("UPDATE pairing_requests SET status = ? WHERE request_id = ?", ("EXPIRED", request_id))
+            raise ValueError("PAIRING_EXPIRED")
+        connection.execute("UPDATE pairing_requests SET status = ?, approved_at = ? WHERE request_id = ?", ("APPROVED", now().isoformat(), request_id))
+
+
+def exchange_pairing(path: Path, request_id: str, owner_id: str, agent_id: str, key_id: str, key_hash: str, key_salt: str) -> Agent:
+    created = now()
+    with _session(path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT * FROM pairing_requests WHERE request_id = ?", (request_id,)).fetchone()
+        if row is None:
+            raise KeyError("PAIRING_NOT_FOUND")
+        if row["status"] != "APPROVED":
+            raise ValueError("PAIRING_NOT_APPROVED")
+        if datetime.fromisoformat(row["expires_at"]) <= created:
+            connection.execute("UPDATE pairing_requests SET status = ? WHERE request_id = ?", ("EXPIRED", request_id))
+            raise ValueError("PAIRING_EXPIRED")
+        connection.execute(
+            "INSERT INTO agents (agent_id, owner_id, name, version, declared_model, framework, created_at, status, capability_state, protocol_version, capabilities_json, execution_providers_json, provider_capabilities_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, owner_id, row["name"], row["version"], row["declared_model"], row["framework"], created.isoformat(), AgentStatus.OFFLINE.value, AgentCapabilityState.REGISTERED.value, row["protocol_version"], row["capabilities_json"], row["execution_providers_json"], row["provider_capabilities_json"]),
+        )
+        connection.execute("INSERT INTO agent_keys (key_id, agent_id, key_hash, key_salt, created_at) VALUES (?, ?, ?, ?, ?)", (key_id, agent_id, key_hash, key_salt, created.isoformat()))
+        connection.execute("UPDATE pairing_requests SET status = ?, exchanged_at = ?, agent_id = ? WHERE request_id = ?", ("EXCHANGED", created.isoformat(), agent_id, request_id))
+    return get_agent(path, agent_id)
+
+
+def create_share(path: Path, evaluation_id: str, token_hash: str) -> None:
+    with _session(path) as connection:
+        connection.execute("INSERT INTO certificate_shares (share_token_hash, evaluation_id, created_at) VALUES (?, ?, ?)", (token_hash, evaluation_id, now().isoformat()))
+
+
+def shared_evaluation(path: Path, token_hash: str) -> str:
+    with _session(path) as connection:
+        row = connection.execute("SELECT evaluation_id FROM certificate_shares WHERE share_token_hash = ?", (token_hash,)).fetchone()
+    if row is None:
+        raise KeyError("SHARE_NOT_FOUND")
+    return str(row["evaluation_id"])

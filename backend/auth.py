@@ -50,6 +50,15 @@ def require_agent_access(request: Request, config: Config, path: Path, agent_id:
     return authenticate_agent(config, path, agent_id, token, mark_seen=True)
 
 
+def require_legacy_run_access(request: Request, config: Config, path: Path, run) -> None:
+    if run.agent_id:
+        require_agent_access(request, config, path, run.agent_id)
+        return
+    if run.mode.value == "SYNTHETIC" and run.target_id in {"REFERENCE_SAFE", "REFERENCE_WEAK"} and not run.target_url:
+        return
+    require_control_plane(request, config)
+
+
 def authenticate_agent(config: Config, path: Path, agent_id: str, token: str, mark_seen: bool = False) -> Agent:
     try:
         agent = db.get_agent(path, agent_id)

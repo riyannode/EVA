@@ -14,7 +14,7 @@ EVA generates a structured scenario, runs the target, applies deterministic orac
 
 ## 3. Demo
 
-Run `REFERENCE_WEAK` and `REFERENCE_SAFE` in `SYNTHETIC` mode as local deterministic fixtures. External agents can register through the control plane and connect outbound through `eva-agent/1`; onboarding and gateway evaluations are exchange-neutral. The official Track 2 demo uses `EXTERNAL_HTTP` with `BITGET_PAPER`; the target URL and declared identity, Bitget market/instrument/account evidence, target trace, filled paper-order detail, oracle reconciliation, and persisted episode evidence are required.
+Run `REFERENCE_WEAK` and `REFERENCE_SAFE` in `SYNTHETIC` mode as local deterministic fixtures. External agents can pair through the Agents page or CLI and connect outbound through `eva-agent/1`; onboarding and gateway evaluations are exchange-neutral. The official Track 2 demo uses `EXTERNAL_HTTP` with `BITGET_PAPER`; the target URL and declared identity, Bitget market/instrument/account evidence, target trace, filled paper-order detail, oracle reconciliation, and persisted episode evidence are required.
 
 ## 4. Architecture
 
@@ -22,7 +22,7 @@ FastAPI schedules one in-process LangGraph state graph. SQLite stores runs, epis
 
 ## 5. External-agent onboarding
 
-Use the dashboard's `Connect External Agent` action or `POST /v1/agents`, copy the one-time API key, then connect an SDK or raw client to `/v1/agent/connect`. Registration accepts optional provider metadata; it is not an exchange credential grant. Synthetic evaluation is available without a venue. See [docs/onboarding.md](docs/onboarding.md), [docs/protocol.md](docs/protocol.md), and [docs/public-api.md](docs/public-api.md).
+Use the dashboard's `Agents` page or `eva auth start`, wait for operator approval, complete the one-time pairing exchange, then connect an SDK or raw client to `/v1/agent/connect`. Registration accepts optional provider metadata; it is not an exchange credential grant. Synthetic evaluation is available without a venue. See [docs/onboarding.md](docs/onboarding.md), [docs/protocol.md](docs/protocol.md), and [docs/public-api.md](docs/public-api.md).
 
 ## 6. Qwen role
 
@@ -55,7 +55,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`, select a target, choose `SYNTHETIC` or `BITGET_PAPER`, and start an evaluation. To connect an external agent, configure `EVA_CONTROL_PLANE_TOKEN`, register the agent, and use the generated onboarding prompt. For Track 2, install/configure the official `bgc`, use `EXTERNAL_HTTP`, provide the target URL, declared target name, and declared target model, configure `BITGET_MODE=paper`, run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`, then inspect `/runs/{id}/verification`, `/runs/{id}/metrics`, and `/runs/{id}/events`.
+Open `http://localhost:5173`, select a target, choose `SYNTHETIC` or `BITGET_PAPER`, and start an evaluation. To connect an external agent, open `Agents`, create a pairing request, and have an operator approve it through the admin path. For Track 2, install/configure the official `bgc`, use `EXTERNAL_HTTP`, provide the target URL, declared target name, and declared target model, configure `BITGET_MODE=paper`, run `GET /verification/preflight?target_url=...&target_name=...&target_model=...`, then inspect `/runs/{id}/verification`, `/runs/{id}/metrics`, and `/runs/{id}/events`.
 
 ## 10. Verification
 

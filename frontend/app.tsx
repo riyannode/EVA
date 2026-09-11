@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { animate } from "animejs";
-import { createEvaluation, createRun, eventUrl, getAgent, getEpisodes, getOnboarding, getRun, getRuns, getScore, getVerification, getWeaknesses, registerAgent, stopRun,
-  getMetrics, type Agent, type AgentRegistration, type Episode, type EvaluationMetrics, type GraphEvent, type Onboarding, type Run, type RunInput, type Scorecard, type Verification, type Weakness } from "./api";
+import { createRun, eventUrl, getEpisodes, getRun, getRuns, getScore, getVerification, getWeaknesses, stopRun,
+  getMetrics, type Episode, type EvaluationMetrics, type GraphEvent, type Run, type RunInput, type Scorecard, type Verification, type Weakness } from "./api";
 import { appendEvent, isActive, parseEvent, readable, stageForEvent, stationForStage, stations, stages, type StationId } from "./graph-view";
 import Analysis from "./analysis";
+import Agents from "./agents";
 import { displayLabel, runLabel } from "./presentation";
 
 const Office = lazy(() => import("./office"));
@@ -41,15 +42,7 @@ export default function App() {
   const [form, setForm] = useState<RunInput>(initialForm);
   const [busy, setBusy] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
-  const [agentOpen, setAgentOpen] = useState(false);
-  const [agentDraft, setAgentDraft] = useState({ name: "", version: "1.0.0", declared_model: "", execution_providers: "" });
-  const [controlToken, setControlToken] = useState("");
-  const [agentRegistration, setAgentRegistration] = useState<AgentRegistration | null>(null);
-  const [connectedAgent, setConnectedAgent] = useState<Agent | null>(null);
-  const [onboarding, setOnboarding] = useState<Onboarding | null>(null);
-  const [agentBusy, setAgentBusy] = useState(false);
-  const agentDialog = useRef<HTMLDialogElement>(null);
-  const [view, setView] = useState<"observatory" | "analysis">("observatory");
+  const [view, setView] = useState<"observatory" | "analysis" | "agents">("observatory");
   const [paused, setPaused] = useState(false);
   const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -126,20 +119,6 @@ export default function App() {
   }, [runId, retry]);
 
   useEffect(() => {
-    if (!agentRegistration) return;
-    let disposed = false;
-    const refresh = async () => {
-      try {
-        const value = await getAgent(agentRegistration.agent.agent_id, agentRegistration.api_key);
-        if (!disposed) setConnectedAgent(value);
-      } catch { if (!disposed) setConnectedAgent(previous => previous ?? agentRegistration.agent); }
-    };
-    void refresh();
-    const timer = setInterval(refresh, 3000);
-    return () => { disposed = true; clearInterval(timer); };
-  }, [agentRegistration]);
-
-  useEffect(() => {
     if (!detail.current || !motion) return;
     const animation = animate(detail.current, { opacity: [0.5, 1], translateY: [5, 0], duration: 220, ease: "outQuad" });
     return () => { animation.revert(); };
@@ -168,30 +147,6 @@ export default function App() {
     finally { setBusy(false); }
   }
 
-  async function connectAgent(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (agentBusy) return;
-    setAgentBusy(true); setError("");
-    try {
-      const registration = await registerAgent({ ...agentDraft, execution_providers: agentDraft.execution_providers.split(",").map(value => value.trim().toLowerCase()).filter(Boolean) }, controlToken);
-      setAgentRegistration(registration);
-      setConnectedAgent(registration.agent);
-      const setup = await getOnboarding(registration.agent.agent_id, registration.api_key);
-      setOnboarding(setup);
-    } catch { setError("Could not register the agent. Check the control-plane token and API connection."); }
-    finally { setAgentBusy(false); }
-  }
-
-  async function startAgentEvaluation() {
-    if (!agentRegistration || agentBusy) return;
-    setAgentBusy(true); setError("");
-    try {
-      const value = await createEvaluation({ agent_id: agentRegistration.agent.agent_id, target_id: "GATEWAY", mode: "SYNTHETIC", max_episodes: 20, difficulty: 1 }, agentRegistration.api_key);
-      setRuns(previous => [value, ...previous]); setRunId(value.id); setTab("Activity"); agentDialog.current?.close(); setAgentOpen(false);
-    } catch { setError("Synthetic evaluation could not start. The agent must be ONLINE first."); }
-    finally { setAgentBusy(false); }
-  }
-
   function navigate(value: typeof tabs[number]) {
     setTab(value);
     inspector.current?.scrollIntoView({ behavior: motion ? "smooth" : "instant", block: "start" });
@@ -205,14 +160,14 @@ export default function App() {
     <a className="skip-link" href="#main">Skip to workspace</a>
     <header className="app-header">
       <a className="brand" href="#main" aria-label="EVA workspace"><span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span><span>EVA</span></a>
-      <nav aria-label="Workspace navigation"><button className={view === "observatory" ? "nav-current" : ""} onClick={() => setView("observatory")}>Observatory</button><button className={view === "analysis" ? "nav-current" : ""} onClick={() => setView("analysis")}>Analysis</button></nav>
+      <nav aria-label="Workspace navigation"><button className={view === "observatory" ? "nav-current" : ""} onClick={() => setView("observatory")}>Observatory</button><button className={view === "analysis" ? "nav-current" : ""} onClick={() => setView("analysis")}>Analysis</button><button className={view === "agents" ? "nav-current" : ""} onClick={() => setView("agents")}>Agents</button></nav>
       <div className={`connection ${connection}`} role="status"><i />{connection === "online" ? "API connected" : connection === "connecting" ? "Connecting" : "API offline"}</div>
     </header>
     <main id="main" className={view === "observatory" ? "observatory-layout" : undefined}>
-      {view === "analysis" ? <Analysis runs={runs} runId={runId} run={run} episodes={episodes} score={score} metrics={metrics} weaknesses={weaknesses} verification={verification} onRunChange={setRunId} /> : <>
+      {view === "analysis" ? <Analysis runs={runs} runId={runId} run={run} episodes={episodes} score={score} metrics={metrics} weaknesses={weaknesses} verification={verification} onRunChange={setRunId} /> : view === "agents" ? <Agents onEvaluationCreated={value => { setRuns(previous => [value, ...previous]); setRunId(value.id); setTab("Activity"); setView("observatory"); }} /> : <>
       <section className="page-heading">
         <div><div className="breadcrumb">Workspace <span>/</span> Observatory</div><h1>Watch your agent being tested.</h1><p>Start an evaluation, follow each step, then review the results in Analysis.</p></div>
-        <div className="heading-actions"><button className="button" onClick={() => { setError(""); setAgentOpen(true); agentDialog.current?.showModal(); }}>Connect External Agent</button><button className="button primary" onClick={() => { setError(""); setConfigOpen(true); dialog.current?.showModal(); }}><span aria-hidden="true">+</span> New evaluation</button></div>
+        <div className="heading-actions"><button className="button primary" onClick={() => { setError(""); setConfigOpen(true); dialog.current?.showModal(); }}><span aria-hidden="true">+</span> New evaluation</button></div>
       </section>
 
       <div className="observatory-primary">
@@ -280,12 +235,6 @@ export default function App() {
         <p className="form-note">{form.mode === "BITGET_PAPER" ? "EVA tests your external agent using Bitget demo funds. Enter the agent endpoint and the model it declares." : "Reference agents are built-in test examples. Choose an external agent to evaluate your own model. Synthetic tests do not place exchange orders."}</p>
         {error && <p className="error" role="alert">{error}</p>}
         <button className="button primary submit-button" disabled={busy}>{busy ? "Creating run…" : "Start evaluation"}</button>
-      </form>
-    </dialog>
-    <dialog ref={agentDialog} className="run-dialog agent-dialog" aria-label="Connect external agent" onClose={() => { setAgentOpen(false); setError(""); }}>
-      <form onSubmit={connectAgent}><div className="dialog-heading"><div><h2>Connect External Agent</h2><p>Register an agent identity, then connect it outbound to EVA.</p></div><button type="button" className="close-button" aria-label="Close agent connection" onClick={() => agentDialog.current?.close()}>×</button></div>
-        {!agentRegistration ? <><label>Agent name<input required maxLength={100} value={agentDraft.name} onChange={event => setAgentDraft(previous => ({ ...previous, name: event.target.value }))} /></label><div className="form-grid"><label>Version<input required maxLength={40} value={agentDraft.version} onChange={event => setAgentDraft(previous => ({ ...previous, version: event.target.value }))} /></label><label>Declared model<input required maxLength={100} value={agentDraft.declared_model} onChange={event => setAgentDraft(previous => ({ ...previous, declared_model: event.target.value }))} /></label></div><label>Trading venues / providers <small>optional · comma-separated</small><input maxLength={300} value={agentDraft.execution_providers} onChange={event => setAgentDraft(previous => ({ ...previous, execution_providers: event.target.value }))} placeholder="bitget, binance, or exchange-agnostic" /></label><label>Control-plane token<small>used only for registration</small><input required type="password" autoComplete="off" value={controlToken} onChange={event => setControlToken(event.target.value)} /></label><p className="form-note">Provider metadata describes the agent only. It does not grant exchange access. Synthetic evaluation remains available without a venue.</p><button className="button primary submit-button" disabled={agentBusy}>{agentBusy ? "Registering…" : "Create agent"}</button></> : <><div className="agent-status-card"><span>Agent ID</span><code>{agentRegistration.agent.agent_id}</code><span>Connection</span><strong>{connectedAgent?.status ?? "OFFLINE"}</strong><span>Synthetic</span><strong>{onboarding?.evaluation.synthetic ?? (connectedAgent?.capability_state === "SYNTHETIC_READY" ? "READY" : "WAITING")}</strong><span>Paper</span><strong>{onboarding?.evaluation.paper ?? "NOT_SUPPORTED_YET"}</strong></div><label>One-time EVA API key<small>copy now; EVA stores only a derived hash</small><textarea readOnly value={agentRegistration.api_key} /></label>{onboarding && <><label>AI-agent setup prompt<textarea readOnly value={onboarding.prompt} /></label><div className="integration-methods">{onboarding.methods.map(method => <div key={method.id}><strong>{method.name}</strong><code>{method.command}</code></div>)}</div></>}<button type="button" className="button primary submit-button" disabled={agentBusy || connectedAgent?.status !== "ONLINE"} onClick={() => void startAgentEvaluation()}>{agentBusy ? "Starting…" : "Start synthetic evaluation"}</button></>}
-        {error && <p className="error" role="alert">{error}</p>}
       </form>
     </dialog>
   </>;

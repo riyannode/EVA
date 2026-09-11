@@ -392,6 +392,25 @@ class AgentRegistration(StrictModel):
     api_key: str
 
 
+class PairingRequestCreate(StrictModel):
+    name: str = Field(min_length=1, max_length=100)
+    version: str = Field(min_length=1, max_length=40)
+    declared_model: str = Field(min_length=1, max_length=100)
+    framework: str | None = Field(default=None, max_length=100)
+    protocol_version: str = Field(default="eva-agent/1", min_length=1, max_length=40)
+    capabilities: list[str] = Field(default_factory=list, max_length=20)
+    execution_providers: list[str] = Field(default_factory=list, max_length=20)
+    provider_capabilities: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class PairingRequest(StrictModel):
+    request_id: str
+    status: Literal["PENDING", "APPROVED", "EXPIRED", "EXCHANGED"]
+    expires_at: datetime
+    approval_url: str
+    agent_id: str | None = None
+
+
 class Certificate(StrictModel):
     certificate_version: str
     evaluation_id: str

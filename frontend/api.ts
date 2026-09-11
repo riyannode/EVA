@@ -178,7 +178,8 @@ export type Agent = {
 };
 
 export type AgentRegistration = { agent: Agent; key: { key_id: string; agent_id: string; created_at: string; revoked_at: string | null; last_used_at: string | null }; api_key: string };
-export type Onboarding = { agent_id: string; protocol: string; gateway_path: string; evaluation: { synthetic: string; paper: string; execution_provider: string; provider_capabilities: string[] }; methods: { id: string; name: string; command: string }[]; prompt: string };
+export type Onboarding = { agent_id: string; protocol: string; gateway_path: string; evaluation: { synthetic: string; paper: string; execution_provider: string | null; provider_capabilities: string[] }; methods: { id: string; name: string; command: string }[]; prompt: string };
+export type PairingRequest = { request_id: string; status: "PENDING" | "APPROVED" | "EXPIRED" | "EXCHANGED"; expires_at: string; approval_url: string; agent_id: string | null };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${base}${path}`, {
@@ -200,7 +201,9 @@ export const getWeaknesses = (id: string) => request<Weakness[]>(`/runs/${encode
 export const getVerification = (id: string) => request<Verification>(`/runs/${encodeURIComponent(id)}/verification`);
 export const stopRun = (id: string) => request<Run>(`/runs/${encodeURIComponent(id)}/stop`, { method: "POST" });
 export const eventUrl = (id: string) => `${base}/runs/${encodeURIComponent(id)}/events`;
-export const registerAgent = (input: { name: string; version: string; declared_model: string; framework?: string; execution_providers?: string[] }, controlToken: string) => request<AgentRegistration>("/v1/agents", { method: "POST", headers: { Authorization: `Bearer ${controlToken}` }, body: JSON.stringify(input) });
+export const createPairingRequest = (input: { name: string; version: string; declared_model: string; framework?: string; execution_providers?: string[] }) => request<PairingRequest>("/v1/pairing-requests", { method: "POST", body: JSON.stringify(input) });
+export const getPairingRequest = (id: string) => request<PairingRequest>(`/v1/pairing-requests/${encodeURIComponent(id)}`);
+export const completePairing = (id: string) => request<AgentRegistration>(`/v1/pairing-requests/${encodeURIComponent(id)}/exchange`, { method: "POST" });
 export const getAgent = (id: string, apiKey: string) => request<Agent>(`/v1/agents/${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${apiKey}` } });
 export const getOnboarding = (id: string, apiKey: string) => request<Onboarding>(`/v1/agents/${encodeURIComponent(id)}/onboarding`, { headers: { Authorization: `Bearer ${apiKey}` } });
 export const createEvaluation = (input: { agent_id: string; target_id: "GATEWAY"; mode: "SYNTHETIC" | "PAPER" | "BITGET_PAPER"; execution_provider?: string; max_episodes: number; difficulty: number }, apiKey: string) => request<Run>("/v1/evaluations", { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: JSON.stringify(input) });
