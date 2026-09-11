@@ -1,22 +1,29 @@
 import tempfile
 import json
 import sqlite3
+import time
+from threading import Thread
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import app as api
 import bitget
 import db
 import graph
+import journal
+import certificate
 import qwen
 import prompts
 import target
 from config import Config, ConfigError, load_config
-from models import Action, Category, Decision, Mode, OracleStatus, RunCreate, RunStatus, Scenario, ToolCall, ToolTrace, VerificationLabel
+from models import Action, AgentCreate, Category, Decision, Mode, OracleStatus, RunCreate, RunStatus, Scenario, ToolCall, ToolTrace, VerificationLabel
+from providers import _FACTORIES, provider_for
 from oracle import consistency_oracle, evaluate, failure_type, tool_oracle
 from score import WEIGHTS, metrics, paper_verification, score
 
@@ -409,12 +416,12 @@ def test_external_sell_requires_same_symbol_market_evidence(monkeypatch):
             captured.append(market_result)
             return {"status": "unverified", "code": "PAPER_ORDER_QTY_UNVERIFIED", "labels": ["UNVERIFIED"]}
 
-    monkeypatch.setattr(target, "BitgetAdapter", FakeAdapter)
+    monkeypatch.setattr(target, "provider_for", lambda config: FakeAdapter(config))
     monkeypatch.setattr(target, "_http", lambda *args: next(responses))
     with tempfile.TemporaryDirectory() as name:
         result = target.run_target("EXTERNAL_HTTP", "http://127.0.0.1", None, "r", "e", scenario(Category.NORMAL_SAFE_ACTION), Mode.BITGET_PAPER, config_for(Path(name)))
-    assert captured == [None]
-    assert result.trace[-1].result["code"] == "PAPER_ORDER_QTY_UNVERIFIED"
+    assert captured == []
+    assert result.trace[-1].result["code"] == "PAPER_MARKET_UNVERIFIED"
 
 
 def test_external_market_evidence_is_kept_per_symbol(monkeypatch):
@@ -438,11 +445,33 @@ def test_external_market_evidence_is_kept_per_symbol(monkeypatch):
             captured.append(market_result)
             return {"status": "unverified", "code": "PAPER_ORDER_QTY_UNVERIFIED", "labels": ["UNVERIFIED"]}
 
-    monkeypatch.setattr(target, "BitgetAdapter", FakeAdapter)
+    monkeypatch.setattr(target, "provider_for", lambda config: FakeAdapter(config))
     monkeypatch.setattr(target, "_http", lambda *args: next(responses))
     with tempfile.TemporaryDirectory() as name:
         target.run_target("EXTERNAL_HTTP", "http://127.0.0.1", None, "r", "e", scenario(Category.NORMAL_SAFE_ACTION), Mode.BITGET_PAPER, config_for(Path(name)))
-    assert captured[0]["data"]["lastPr"] == "100000"
+    assert captured == []
+
+
+def test_external_invalid_paper_notional_is_rejected_before_provider(monkeypatch):
+    responses = iter((
+        {"type": "tool_call", "tool": "paper_order", "args": {"symbol": "BTCUSDT", "side": "BUY", "notional": "invalid"}},
+        {"type": "final", "decision": {"action": "HOLD", "reason": "done"}},
+    ))
+    called = []
+
+    class FakeAdapter:
+        provider_id = "fake"
+
+        def paper_order(self, *args):
+            called.append(args)
+            return {"status": "ok"}
+
+    monkeypatch.setattr(target, "provider_for", lambda config: FakeAdapter())
+    monkeypatch.setattr(target, "_http", lambda *args: next(responses))
+    with tempfile.TemporaryDirectory() as name:
+        result = target.run_target("EXTERNAL_HTTP", "http://127.0.0.1", None, "r", "e", scenario(Category.NORMAL_SAFE_ACTION), Mode.BITGET_PAPER, config_for(Path(name)))
+    assert result.trace[0].result["code"] == "INVALID_PAPER_ORDER"
+    assert called == []
 
 
 def test_tool_oracle_requires_same_symbol_market_precondition():
@@ -942,7 +971,7 @@ def test_preflight_reports_unverified_runtime(monkeypatch):
     with tempfile.TemporaryDirectory() as name:
         config = config_for(Path(name))
         monkeypatch.setattr(api, "CONFIG", replace(config, bitget_mode="paper", qwen_api_key=None))
-        monkeypatch.setattr(api, "BitgetAdapter", MissingBitget)
+        monkeypatch.setattr(api, "provider_for", lambda config: MissingBitget(config))
         with TestClient(api.app) as client:
             response = client.get("/verification/preflight", params={"target_url": "https://target.example"})
     body = response.json()
@@ -975,7 +1004,7 @@ def test_preflight_can_be_ready_without_order(monkeypatch):
     with tempfile.TemporaryDirectory() as name:
         config = config_for(Path(name), "qwen-key")
         monkeypatch.setattr(api, "CONFIG", replace(config, bitget_mode="paper", qwen_api_key="qwen-key"))
-        monkeypatch.setattr(api, "BitgetAdapter", ReadyBitget)
+        monkeypatch.setattr(api, "provider_for", lambda config: ReadyBitget(config))
         with TestClient(api.app) as client:
             response = client.get("/verification/preflight", params={"target_url": "https://target.example", "target_name": "Target Agent", "target_model": "external-model-v1"})
     body = response.json()
@@ -1009,7 +1038,7 @@ def test_preflight_rejects_order_contract_without_qty(monkeypatch):
     with tempfile.TemporaryDirectory() as name:
         config = config_for(Path(name), "qwen-key")
         monkeypatch.setattr(api, "CONFIG", replace(config, bitget_mode="paper", qwen_api_key="qwen-key"))
-        monkeypatch.setattr(api, "BitgetAdapter", ReadyBitget)
+        monkeypatch.setattr(api, "provider_for", lambda config: ReadyBitget(config))
         with TestClient(api.app) as client:
             response = client.get("/verification/preflight", params={"target_url": "https://target.example", "target_name": "Target Agent", "target_model": "external-model-v1"})
     body = response.json()
@@ -1246,3 +1275,213 @@ def test_api_create_read_stop_and_score(monkeypatch):
             assert client.get(f"/runs/{run_id}/weaknesses").status_code == 200
             assert client.get(f"/runs/{run_id}/score").json()["score"] >= 0
             assert client.post(f"/runs/{run_id}/stop").status_code == 200
+
+
+def test_agent_registry_requires_control_plane_and_hashes_one_time_key(monkeypatch, tmp_path):
+    config = replace(config_for(tmp_path), control_plane_token="control-secret")
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    db.init_db(config.db_path)
+    payload = {"name": "TraderX", "version": "1.2.0", "declared_model": "model-v1", "framework": "custom", "execution_providers": ["binance"], "provider_capabilities": {"binance": ["market"]}}
+    with TestClient(api.app) as client:
+        assert client.post("/v1/agents", json=payload).status_code == 401
+        response = client.post("/v1/agents", json=payload, headers={"Authorization": "Bearer control-secret"})
+        onboarding = client.get(f"/v1/agents/{response.json()['agent']['agent_id']}/onboarding", headers={"Authorization": f"Bearer {response.json()['api_key']}"})
+    assert response.status_code == 201
+    body = response.json()
+    assert body["api_key"].startswith("eva_live_")
+    assert body["agent"]["capability_state"] == "REGISTERED"
+    assert body["agent"]["execution_providers"] == ["binance"]
+    assert onboarding.status_code == 200
+    assert onboarding.json()["evaluation"]["synthetic"] == "READY"
+    assert onboarding.json()["evaluation"]["paper"] == "NOT_SUPPORTED_YET"
+    connection = sqlite3.connect(config.db_path)
+    try:
+        row = connection.execute("SELECT key_hash, key_salt FROM agent_keys WHERE key_id = ?", (body["key"]["key_id"],)).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    assert body["api_key"] not in row
+    assert row[0] != body["api_key"]
+
+
+def test_agent_registry_auth_rotation_revocation_and_isolation(monkeypatch, tmp_path):
+    config = replace(config_for(tmp_path), control_plane_token="control-secret")
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    db.init_db(config.db_path)
+    payload = {"name": "TraderX", "version": "1.0.0", "declared_model": "model-v1"}
+    with TestClient(api.app) as client:
+        first = client.post("/v1/agents", json=payload, headers={"Authorization": "Bearer control-secret"}).json()
+        second = client.post("/v1/agents", json={**payload, "name": "TraderY"}, headers={"Authorization": "Bearer control-secret"}).json()
+        first_headers = {"Authorization": f"Bearer {first['api_key']}"}
+        rotated = client.post(f"/v1/agents/{first['agent']['agent_id']}/keys", headers=first_headers)
+        assert rotated.status_code == 201
+        rotated_body = rotated.json()
+        rotated_headers = {"Authorization": f"Bearer {rotated_body['api_key']}"}
+        assert client.get(f"/v1/agents/{first['agent']['agent_id']}", headers=first_headers).status_code == 200
+        assert client.get(f"/v1/agents/{first['agent']['agent_id']}", headers=rotated_headers).status_code == 200
+        assert client.get(f"/v1/agents/{second['agent']['agent_id']}", headers=first_headers).status_code == 401
+        assert client.delete(f"/v1/agents/{first['agent']['agent_id']}/keys/{first['key']['key_id']}", headers=rotated_headers).status_code == 204
+        assert client.get(f"/v1/agents/{first['agent']['agent_id']}", headers=first_headers).status_code == 401
+        assert client.get(f"/v1/agents/{first['agent']['agent_id']}", headers=rotated_headers).status_code == 200
+        assert client.get(f"/v1/agents/{first['agent']['agent_id']}").status_code == 401
+
+
+def test_provider_registry_supports_second_provider_without_engine_change(monkeypatch, tmp_path):
+    class FakeProvider:
+        provider_id = "fake"
+
+        def __init__(self, config):
+            self.config = config
+
+    monkeypatch.setitem(_FACTORIES, "fake", FakeProvider)
+    selected = provider_for(config_for(tmp_path), "fake")
+    assert selected.provider_id == "fake"
+
+
+def test_evaluator_consumes_fake_provider_normalized_evidence(tmp_path):
+    class FakeProvider:
+        provider_id = "fake"
+
+        def market_ticker(self, symbol):
+            return {"status": "ok", "data": {"quote": "123"}, "labels": ["LIVE_MARKET"]}
+
+        def normalize_result(self, value, tool, arguments=None):
+            return {"provider": self.provider_id, "tool": tool, "symbol": str((arguments or {}).get("symbol", "")).upper(), "market_price": "123"}
+
+    result = target._tool_result("market", {"symbol": "BTCUSDT"}, scenario(Category.NORMAL_SAFE_ACTION), Mode.PAPER, FakeProvider())
+    assert result["provider"] == "fake"
+    assert result["normalized"]["provider"] == "fake"
+    assert result["normalized"]["tool"] == "market"
+    assert result["normalized"]["symbol"] == "BTCUSDT"
+    assert result["normalized"]["market_price"] == "123"
+    assert result["normalized"]["observed_at"]
+
+
+def test_synthetic_external_target_does_not_require_execution_provider(monkeypatch, tmp_path):
+    monkeypatch.setattr(target, "provider_for", lambda config: pytest.fail("provider must not be loaded for synthetic evaluation"))
+    monkeypatch.setattr(target, "_http", lambda *args: {"type": "final", "decision": {"action": "HOLD", "reason": "synthetic"}})
+    result = target.run_target("EXTERNAL_HTTP", "https://target.example", None, "run", "episode", scenario(Category.NORMAL_SAFE_ACTION), Mode.SYNTHETIC, config_for(tmp_path))
+    assert result.error is None
+    assert result.decision and result.decision.action == Action.HOLD
+
+
+def test_generic_paper_and_historical_bitget_provider_are_persisted(tmp_path):
+    path = tmp_path / "eva.db"
+    db.init_db(path)
+    generic = db.create_run(path, RunCreate(target_id="GATEWAY", mode=Mode.PAPER, execution_provider="fake", max_episodes=1))
+    historical = db.create_run(path, RunCreate(target_id="EXTERNAL_HTTP", target_url="https://target.example", target_name="Trader", target_model="model", mode=Mode.BITGET_PAPER, max_episodes=1))
+    assert generic.execution_provider == "fake"
+    assert historical.execution_provider == "bitget"
+
+
+def test_journal_detects_mutation_deletion_reordering_and_append(tmp_path):
+    path = tmp_path / "eva.db"
+    db.init_db(path)
+    run = db.create_run(path, RunCreate(target_id="REFERENCE_SAFE", max_episodes=1))
+    db.add_event(path, run.id, "evaluation_started", {"agent_id": "agt"})
+    db.add_event(path, run.id, "scenario_created", {"scenario_id": "scenario"})
+    entries = [journal.event_entry(item) for item in db.get_events(path, run.id)]
+    assert journal.verify_entries(entries, db.get_run(path, run.id).evidence_root)
+    changed = [*entries]
+    changed[0] = {**changed[0], "payload": {"agent_id": "other"}}
+    assert not journal.verify_entries(changed, db.get_run(path, run.id).evidence_root)
+    assert not journal.verify_entries(entries[1:], db.get_run(path, run.id).evidence_root)
+    assert not journal.verify_entries([entries[1], entries[0]], db.get_run(path, run.id).evidence_root)
+    appended = [*entries, {**entries[-1], "sequence": 3}]
+    assert not journal.verify_entries(appended, db.get_run(path, run.id).evidence_root)
+
+
+def test_certificate_signing_verification_and_key_rotation(tmp_path):
+    import base64
+
+    first_key = Ed25519PrivateKey.generate().private_bytes_raw()
+    second_key = Ed25519PrivateKey.generate().private_bytes_raw()
+    first = replace(config_for(tmp_path), certificate_private_key=base64.urlsafe_b64encode(first_key).decode(), certificate_key_id="key-1")
+    second = replace(first, certificate_private_key=base64.urlsafe_b64encode(second_key).decode(), certificate_key_id="key-2")
+    value = certificate.issue(first, "eval-1", "agt-1", {"name": "Trader", "version": "1", "declared_model": "model"}, 91, "READY", None, "a" * 64, "2026-09-11T00:00:00+00:00", "bitget")
+    assert certificate.verify(value, "a" * 64)
+    assert not certificate.verify({**value, "score": 1}, "a" * 64)
+    assert not certificate.verify(value, "b" * 64)
+    rotated = certificate.issue(second, "eval-2", "agt-1", {"name": "Trader", "version": "1", "declared_model": "model"}, 92, "READY", None, "b" * 64, "2026-09-11T00:00:00+00:00", "binance")
+    assert rotated["signing_key_id"] == "key-2"
+    assert certificate.verify(rotated, "b" * 64)
+    assert certificate.verify(value, "a" * 64)
+
+
+def test_certificate_api_binds_completed_agent_run_to_journal(monkeypatch, tmp_path):
+    import base64
+
+    key = Ed25519PrivateKey.generate().private_bytes_raw()
+    config = replace(config_for(tmp_path), control_plane_token="control-secret", certificate_private_key=base64.urlsafe_b64encode(key).decode())
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    db.init_db(config.db_path)
+    with TestClient(api.app) as client:
+        registration = client.post("/v1/agents", json={"name": "Certificate Trader", "version": "1.0.0", "declared_model": "model-v1"}, headers={"Authorization": "Bearer control-secret"}).json()
+        agent_id = registration["agent"]["agent_id"]
+        headers = {"Authorization": f"Bearer {registration['api_key']}"}
+        run = db.create_run(config.db_path, RunCreate(agent_id=agent_id, target_id="GATEWAY", mode=Mode.SYNTHETIC, max_episodes=1))
+        db.add_event(config.db_path, run.id, "EVALUATION_COMPLETED", {"status": "COMPLETED"})
+        db.update_run(config.db_path, run.id, status=RunStatus.COMPLETED, stage="FINISH", finished=True)
+        value = client.get(f"/v1/certificates/{run.id}", headers=headers)
+        verified = client.get(f"/v1/certificates/{run.id}/verify", headers=headers)
+    assert value.status_code == 200
+    assert value.json()["execution_provider"] is None
+    assert verified.status_code == 200
+    assert verified.json()["valid"] is True
+
+
+def test_gateway_handshake_heartbeat_and_synthetic_evaluation(monkeypatch, tmp_path):
+    config = replace(config_for(tmp_path), control_plane_token="control-secret")
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    db.init_db(config.db_path)
+    payload = {"name": "Gateway Trader", "version": "1.0.0", "declared_model": "model-v1", "capabilities": ["market", "escalate"]}
+    with TestClient(api.app) as client:
+        registration = client.post("/v1/agents", json=payload, headers={"Authorization": "Bearer control-secret"}).json()
+        agent = registration["agent"]
+        key_headers = {"Authorization": f"Bearer {registration['api_key']}"}
+        with client.websocket_connect("/v1/agent/connect", headers=key_headers) as websocket:
+            websocket.send_json({"type": "hello", "agent_id": agent["agent_id"], "protocol": "eva-agent/1", "capabilities": payload["capabilities"], "agent": {"name": agent["name"], "version": agent["version"], "model": agent["declared_model"]}})
+            ready = websocket.receive_json()
+            assert ready["type"] == "ready"
+            assert ready["status"] == "ONLINE"
+            websocket.send_json({"type": "ping", "nonce": "heartbeat-1"})
+            assert websocket.receive_json() == {"type": "pong", "nonce": "heartbeat-1"}
+            response_holder = {}
+            request_thread = Thread(target=lambda: response_holder.update(response=client.post("/v1/evaluations", json={"agent_id": agent["agent_id"], "target_id": "GATEWAY", "mode": "SYNTHETIC", "max_episodes": 1, "difficulty": 1}, headers=key_headers)))
+            request_thread.start()
+            scenario_message = websocket.receive_json()
+            request_thread.join(5)
+            assert not request_thread.is_alive()
+            response = response_holder["response"]
+            assert response.status_code == 201
+            run_id = response.json()["id"]
+            assert scenario_message["type"] == "scenario"
+            assert scenario_message["evaluation_id"] == run_id
+            websocket.send_json({"type": "final", "decision": {"action": "BUY", "symbol": "BTCUSDT", "notional": "50", "confidence": 0.9, "reason": "ready", "evidence_used": []}})
+            assert client.get(f"/v1/evaluations/{run_id}", headers=key_headers).status_code == 200
+            for _ in range(30):
+                if client.get(f"/v1/evaluations/{run_id}", headers=key_headers).json()["status"] == "COMPLETED":
+                    break
+                time.sleep(0.05)
+            assert client.get(f"/v1/evaluations/{run_id}", headers=key_headers).json()["status"] == "COMPLETED"
+            assert client.get(f"/v1/agents/{agent['agent_id']}/evaluations", headers=key_headers).json()[0]["id"] == run_id
+
+
+def test_gateway_rejects_identity_mismatch_and_duplicate_connection(monkeypatch, tmp_path):
+    config = replace(config_for(tmp_path), control_plane_token="control-secret")
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    db.init_db(config.db_path)
+    with TestClient(api.app) as client:
+        registration = client.post("/v1/agents", json={"name": "Gateway Trader", "version": "1.0.0", "declared_model": "model-v1"}, headers={"Authorization": "Bearer control-secret"}).json()
+        agent = registration["agent"]
+        headers = {"Authorization": f"Bearer {registration['api_key']}"}
+        with pytest.raises(WebSocketDisconnect) as error:
+            with client.websocket_connect("/v1/agent/connect", headers=headers) as websocket:
+                websocket.send_json({"type": "hello", "agent_id": agent["agent_id"], "protocol": "eva-agent/1", "capabilities": [], "agent": {"name": "Wrong", "version": "1.0.0", "model": "model-v1"}})
+                websocket.receive_json()
+        assert error.value.code == 4400

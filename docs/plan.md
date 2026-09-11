@@ -10,9 +10,10 @@
 
 ## Global Constraints
 
-- Only `backend/`, `frontend/`, and `docs/` are repository root directories.
+- Only `backend/`, `frontend/`, `docs/`, `sdk/`, and `cli/` are repository root product directories.
 - No helpers, utils, services, repositories, controllers, components, hooks, lib, common, or shared folders.
-- `SYNTHETIC` and `BITGET_PAPER` are the only benchmark modes.
+- `SYNTHETIC`, generic `PAPER`, and compatibility `BITGET_PAPER` are the benchmark modes.
+- Execution-backed logic depends on the provider contract; Bitget is the first registered provider.
 - Qwen may generate scenarios, critiques, and mutations; deterministic code owns pass/fail and readiness.
 - Bitget writes are paper-trading only and use an explicit allowlist with `shell=False`.
 - SQLite uses parameterized SQL and no ORM; `eva.db` and `checkpoints.db` are ignored.
@@ -28,10 +29,13 @@
 - `backend/qwen.py`: optional OpenAI-compatible scenario, critic, and mutation calls with validation and one scenario repair retry.
 - `backend/target.py`: HTTP protocol, reference weak/safe targets, tool loop, caps, and target errors.
 - `backend/bitget.py`: fixed Bitget CLI invocation with paper-only write support.
+- `backend/provider.py`, `backend/providers.py`: exchange-neutral execution contract, normalization seam, and provider registry.
 - `backend/graph.py`: one LangGraph state machine and deterministic curriculum.
 - `backend/app.py`: FastAPI endpoints and in-process run scheduling.
+- `backend/auth.py`, `backend/gateway.py`, `backend/journal.py`, `backend/certificate.py`: registry auth, outbound agent gateway, evidence lineage, and signed certificates.
 - `backend/test_eva.py`: focused backend regression tests.
 - `frontend/index.html`, `main.tsx`, `app.tsx`, `api.ts`, `styles.css`, `package.json`, `package-lock.json`, `tsconfig.json`, `vite.config.ts`: flat dashboard.
+- `sdk/typescript`, `sdk/python`, `cli`: framework-neutral gateway clients and onboarding/verification commands.
 - `README.md`, `LICENSE`, `docs/architecture.md`, `docs/demo.md`, `docs/submission.md`, `docs/verification.md`: user-facing product and evidence documentation.
 
 ## Execution Tasks

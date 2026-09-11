@@ -2,11 +2,14 @@ const base = import.meta.env?.VITE_API_URL || "http://localhost:8000";
 
 export type Run = {
   id: string;
+  agent_id: string | null;
+  execution_provider: string | null;
+  evidence_root: string | null;
   target_id: string;
   target_name: string | null;
   target_model: string | null;
   target_version: string;
-  mode: "SYNTHETIC" | "BITGET_PAPER";
+  mode: "SYNTHETIC" | "PAPER" | "BITGET_PAPER";
   status: "CREATED" | "RUNNING" | "COMPLETED" | "STOPPED" | "FAILED";
   difficulty: number;
   max_episodes: number;
@@ -17,6 +20,8 @@ export type Run = {
 };
 
 export type RunInput = Pick<Run, "target_id" | "target_version" | "mode" | "max_episodes" | "difficulty"> & {
+  agent_id?: string;
+  execution_provider?: string;
   target_url?: string;
   target_name?: string;
   target_model?: string;
@@ -152,6 +157,29 @@ export type Verification = {
   target_identity?: Record<string, string | null>;
 };
 
+export type Agent = {
+  agent_id: string;
+  owner_id: string;
+  name: string;
+  version: string;
+  declared_model: string;
+  framework: string | null;
+  created_at: string;
+  last_seen_at: string | null;
+  status: "OFFLINE" | "CONNECTING" | "ONLINE" | "EVALUATING" | "DEGRADED" | "DISABLED";
+  capability_state: "REGISTERED" | "SYNTHETIC_READY" | "PAPER_ELIGIBLE";
+  protocol_version: string;
+  capabilities: string[];
+  execution_providers: string[];
+  provider_capabilities: Record<string, string[]>;
+  evaluation_count: number;
+  latest_readiness: string | null;
+  latest_evaluation_id: string | null;
+};
+
+export type AgentRegistration = { agent: Agent; key: { key_id: string; agent_id: string; created_at: string; revoked_at: string | null; last_used_at: string | null }; api_key: string };
+export type Onboarding = { agent_id: string; protocol: string; gateway_path: string; evaluation: { synthetic: string; paper: string; execution_provider: string; provider_capabilities: string[] }; methods: { id: string; name: string; command: string }[]; prompt: string };
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${base}${path}`, {
     ...init,
@@ -172,3 +200,7 @@ export const getWeaknesses = (id: string) => request<Weakness[]>(`/runs/${encode
 export const getVerification = (id: string) => request<Verification>(`/runs/${encodeURIComponent(id)}/verification`);
 export const stopRun = (id: string) => request<Run>(`/runs/${encodeURIComponent(id)}/stop`, { method: "POST" });
 export const eventUrl = (id: string) => `${base}/runs/${encodeURIComponent(id)}/events`;
+export const registerAgent = (input: { name: string; version: string; declared_model: string; framework?: string; execution_providers?: string[] }, controlToken: string) => request<AgentRegistration>("/v1/agents", { method: "POST", headers: { Authorization: `Bearer ${controlToken}` }, body: JSON.stringify(input) });
+export const getAgent = (id: string, apiKey: string) => request<Agent>(`/v1/agents/${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${apiKey}` } });
+export const getOnboarding = (id: string, apiKey: string) => request<Onboarding>(`/v1/agents/${encodeURIComponent(id)}/onboarding`, { headers: { Authorization: `Bearer ${apiKey}` } });
+export const createEvaluation = (input: { agent_id: string; target_id: "GATEWAY"; mode: "SYNTHETIC" | "PAPER" | "BITGET_PAPER"; execution_provider?: string; max_episodes: number; difficulty: number }, apiKey: string) => request<Run>("/v1/evaluations", { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: JSON.stringify(input) });

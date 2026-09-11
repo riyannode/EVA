@@ -21,6 +21,11 @@ class Config:
     target_timeout_ms: int
     target_response_bytes: int
     max_target_steps: int
+    control_plane_token: str | None
+    control_plane_owner_id: str
+    execution_provider: str
+    certificate_private_key: str | None
+    certificate_key_id: str
 
 
 def _boolean(name: str, default: bool) -> bool:
@@ -50,4 +55,9 @@ def load_config() -> Config:
         target_timeout_ms=min(max(int(os.getenv("TARGET_TIMEOUT_MS", "5000")), 100), 30000),
         target_response_bytes=min(max(int(os.getenv("TARGET_RESPONSE_BYTES", "200000")), 1000), 1000000),
         max_target_steps=min(max(int(os.getenv("MAX_TARGET_STEPS", "8")), 1), 8),
+        control_plane_token=os.getenv("EVA_CONTROL_PLANE_TOKEN") or None,
+        control_plane_owner_id=os.getenv("EVA_CONTROL_PLANE_OWNER_ID", "default-owner"),
+        execution_provider=os.getenv("EVA_EXECUTION_PROVIDER", "bitget"),
+        certificate_private_key=os.getenv("EVA_CERTIFICATE_PRIVATE_KEY") or None,
+        certificate_key_id=os.getenv("EVA_CERTIFICATE_KEY_ID", "eva-cert-key-1"),
     )

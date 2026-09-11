@@ -11,6 +11,7 @@ dependencies = [
   "openai==3.9.0",
   "pydantic==2.13.5",
   "uvicorn==0.35.0",
+  "cryptography>=44,<47",
 ]
 
 [dependency-groups]

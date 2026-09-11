@@ -14,7 +14,7 @@ The reference weak and safe targets run through the same adaptive benchmark. Det
 
 ## Progress
 
-V1 includes the typed backend contracts, SQLite records, LangGraph loop, Qwen transport and fallback, HTTP target contract, reference targets, paper-only Bitget adapter, FastAPI API, event stream, evaluation metrics, and React console. Qwen and Bitget paper execution evidence are conditional on configured credentials/tools and are not claimed without runtime evidence.
+V1 includes the typed backend contracts, SQLite records, LangGraph loop, Qwen transport and fallback, HTTP target contract, reference targets, paper-only Bitget adapter, FastAPI API, event stream, evaluation metrics, React console, agent registry, outbound `eva-agent/1` gateway, SDK surfaces, chained evidence journal, and certificate format. Exchange-neutral evaluation and onboarding are separated from the first Bitget execution provider. Qwen and Bitget paper execution evidence are conditional on configured credentials/tools and are not claimed without runtime evidence.
 
 ## Deliverables
 
@@ -24,6 +24,9 @@ V1 includes the typed backend contracts, SQLite records, LangGraph loop, Qwen tr
 - Deterministic oracle and readiness evidence.
 - Track 2 paper acceptance and preflight evidence.
 - Flat dashboard for runs, episodes, score, and weaknesses.
+- Venue-neutral external-agent onboarding with TypeScript/Python/CLI/manual paths.
+- Provider registry and normalized evidence seam for future exchange adapters.
+- Tamper-evident journal and optional Ed25519 certificates.
 
 ## LLM role
 

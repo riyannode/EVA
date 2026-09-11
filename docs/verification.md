@@ -31,6 +31,15 @@
 | Declared external target identity | yes | yes | API and SQLite readback tests | CONDITIONAL |
 | Evaluation metrics | yes | yes | empty-data and stored-episode metric tests | VERIFIED |
 | External target integration | yes | yes | timeout, malformed response, step cap tests | CONTRACT_VERIFIED |
+| Agent registry and hashed keys | yes | yes | authenticated registration, rotation, revocation, isolation tests | VERIFIED |
+| Agent gateway `eva-agent/1` | yes | yes | TestClient handshake, heartbeat, identity, and synthetic evaluation tests | CONTRACT_VERIFIED |
+| Exchange provider boundary | yes | yes | registry seam, normalized provider evidence, and paper-gate tests | CONTRACT_VERIFIED |
+| Tamper-evident journal | yes | yes | chain mutation, deletion, reorder, and append tests | VERIFIED |
+| Signed certificates | yes | yes | Ed25519 issue, offline verification, root binding, and key rotation tests | CONDITIONAL |
+| TypeScript dashboard | yes | yes | `npm test`, `npm run typecheck`, `npm run build` | VERIFIED |
+| TypeScript SDK | yes | yes | strict TypeScript compiler check | CONTRACT_VERIFIED |
+| Python SDK syntax | yes | yes | targeted `py_compile` | CONTRACT_VERIFIED |
+| CLI syntax | yes | yes | `node --check cli/index.mjs` | CONTRACT_VERIFIED |
 
 ## Labels
 
@@ -42,8 +51,15 @@
 cd backend
 uv sync
 uv run pytest test_eva.py -q
+cd ..\frontend
+npm ci
+npm test
+npm run typecheck
+npm run build
 ```
 
 The current host resolves Python 3.14.7 through `uv`. The official CLI is installed separately with `npm install -g @bitget-ai/bitget-agent-cli`; Bitget and Qwen runtime evidence remains conditional on credentials and the configured `bgc` executable.
 
 Preflight is a pre-run environment check. Its `paper_run_ready` and compatibility `official_track2_ready` fields do not certify an order. `/runs/{id}/verification` is the post-run acceptance gate and requires persisted market/account evidence, a verified paper order, deterministic reconciliation, and runtime Qwen critic evidence.
+
+The gateway, SDKs, registry, journal, and certificate checks are contract-level evidence. Public production smoke, WSS termination, configured Qwen calls, configured `bgc` calls, and a complete external-agent Bitget PAPER run remain unverified until run in their target environment.

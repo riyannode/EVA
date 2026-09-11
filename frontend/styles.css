@@ -90,6 +90,7 @@ main { max-width: 1600px; margin: 0 auto; padding: 0 40px; }
 .breadcrumb span { color: #657674; }
 h1 { font: 25px/1.5 var(--pixel); letter-spacing: -1px; }
 .page-heading p { font-size: 13px; color: var(--muted); margin-top: 5px; }
+.heading-actions { display: flex; gap: 10px; align-items: center; }
 .button { min-height: 42px; padding: 0 18px; display: inline-flex; align-items: center; justify-content: center; gap: 10px; font-weight: 600; font-size: 12px; border: 1px solid #4c6050; }
 .primary { background: var(--accent); color: #21301f; border: 1px solid #dbedce; box-shadow: 3px 3px 0 #526b47; }
 .primary:hover { background: #cce9bc; }
@@ -210,7 +211,15 @@ footer { display: flex; justify-content: space-between; gap: 20px; font-size: 10
 .close-button { font-size: 25px; padding: 0 8px; min-height: 32px; }
 .run-dialog label { display: grid; gap: 8px; font-size: 12px; margin-bottom: 17px; }
 .run-dialog label small { font-size: 10px; color: var(--muted); }
-.run-dialog input, .run-dialog select { min-width: 0; width: 100%; padding: 10px; min-height: 40px; border: 1px solid #4e6258; background: #141e1d; color: #e1e9d9; font-size: 12px; border-radius: 0; }
+.run-dialog input, .run-dialog select, .run-dialog textarea { min-width: 0; width: 100%; padding: 10px; min-height: 40px; border: 1px solid #4e6258; background: #141e1d; color: #e1e9d9; font-size: 12px; border-radius: 0; }
+.run-dialog textarea { min-height: 72px; resize: vertical; }
+.agent-status-card { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px; margin-bottom: 18px; border: 1px solid #4e6258; background: #141e1d; }
+.agent-status-card span { color: var(--muted); font-size: 10px; }
+.agent-status-card code, .agent-status-card strong { overflow-wrap: anywhere; color: var(--accent); font-size: 11px; }
+.integration-methods { display: grid; gap: 8px; margin: 4px 0 18px; }
+.integration-methods div { display: grid; gap: 4px; padding: 9px 10px; border-left: 2px solid var(--accent); background: #141e1d; }
+.integration-methods strong { font-size: 11px; }
+.integration-methods code { color: #b9c9bd; font-size: 10px; overflow-wrap: anywhere; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
 .form-note { font-size: 11px; color: #acbcae; line-height: 1.7; margin: 4px 0 20px; }
 .submit-button { width: 100%; }
@@ -373,6 +382,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; font-size: 10
   .mobile-only { display: block; }
   .page-heading p { font-size: 12px; margin-top: 8px; }
   .page-heading .primary { min-height: 41px; }
+  .heading-actions { width: 100%; flex-wrap: wrap; }
   .connection-notice { font-size: 11px; align-items: center; padding: 11px; }
   .panel-heading { padding: 13px; }
   .scene-controls { gap: 5px; }

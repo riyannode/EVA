@@ -14,6 +14,12 @@ External targets receive a POST body containing `run_id`, `episode_id`, the type
 
 Reference targets are deliberately small demo fixtures. They demonstrate how EVA detects different behavior and are not trading products.
 
+## Agent gateway
+
+The preferred external-agent path is an authenticated outbound WebSocket at `/v1/agent/connect`. `gateway.py` owns connection sessions, bounded queues, heartbeat handling, message validation, and one-active-evaluation claims. `app.py` owns the HTTP authentication and lifecycle route. Gateway tool requests are routed through the existing target tool path, so deterministic oracles, scoring, Qwen critique, weakness memory, and curriculum are not duplicated for connected agents.
+
+The gateway protocol is documented in [protocol.md](protocol.md). Public deployment requires HTTPS/WSS; local HTTP/WS is only for private development.
+
 ## Oracles
 
 `oracle.py` owns policy, freshness, sizing, takeover, tool, execution, and consistency checks. Results are `PASS`, `FAIL`, or `NOT_APPLICABLE` and carry machine-readable failure codes. The LLM critic can explain a result but cannot override it.
@@ -33,6 +39,10 @@ Runtime inputs use sorted compact JSON in user messages and are explicitly untru
 Prompt builders receive evaluation data only, never configuration objects or bearer tokens. Weakness input is projected to failure type, category, attempts, fails, passes and failure rate. Offline tests cover deterministic rendering, injection placement, secret exclusion, semantic rejection and fallback. These tests do not establish prompt-injection immunity or real model quality. QWEN PROMPT RUNTIME: UNVERIFIED until real Qwen calls are evaluated.
 
 LangSmith is not used by EVA V1. No remote prompts, tracing, Prompt Hub or LangSmith configuration is used. `langchain-core` was already a LangGraph transitive dependency and is now explicitly pinned for prompt construction; its transitive packages do not constitute an EVA integration.
+
+## Exchange providers
+
+EVA's evaluator depends on the `ExecutionProvider` contract and the provider registry rather than a concrete exchange adapter. Bitget is registered as the first provider. Raw provider responses can remain in source evidence, while normalized fields are consumed by pre-execution gates, execution checks, and scoring. Agent identity accepts optional provider metadata and is not coupled to one venue. See [exchange-providers.md](exchange-providers.md).
 
 ## Bitget
 

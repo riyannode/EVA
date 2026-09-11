@@ -12,6 +12,7 @@ class StrictModel(BaseModel):
 
 class Mode(str, Enum):
     SYNTHETIC = "SYNTHETIC"
+    PAPER = "PAPER"
     BITGET_PAPER = "BITGET_PAPER"
 
 
@@ -21,6 +22,21 @@ class RunStatus(str, Enum):
     COMPLETED = "COMPLETED"
     STOPPED = "STOPPED"
     FAILED = "FAILED"
+
+
+class AgentStatus(str, Enum):
+    OFFLINE = "OFFLINE"
+    CONNECTING = "CONNECTING"
+    ONLINE = "ONLINE"
+    EVALUATING = "EVALUATING"
+    DEGRADED = "DEGRADED"
+    DISABLED = "DISABLED"
+
+
+class AgentCapabilityState(str, Enum):
+    REGISTERED = "REGISTERED"
+    SYNTHETIC_READY = "SYNTHETIC_READY"
+    PAPER_ELIGIBLE = "PAPER_ELIGIBLE"
 
 
 class OracleStatus(str, Enum):
@@ -170,6 +186,8 @@ class CriticResult(StrictModel):
 
 
 class RunCreate(StrictModel):
+    agent_id: str | None = Field(default=None, max_length=100)
+    execution_provider: str | None = Field(default=None, min_length=1, max_length=40, pattern=r"^[a-z0-9][a-z0-9_-]*$")
     target_id: str = Field(min_length=1, max_length=100)
     target_version: str = Field(default="demo", min_length=1, max_length=40)
     target_name: str | None = Field(default=None, max_length=100)
@@ -182,17 +200,20 @@ class RunCreate(StrictModel):
 
     @model_validator(mode="after")
     def validate_paper_target(self) -> "RunCreate":
-        if self.mode == Mode.BITGET_PAPER and self.target_id != "EXTERNAL_HTTP":
+        if self.mode in {Mode.PAPER, Mode.BITGET_PAPER} and self.target_id not in {"EXTERNAL_HTTP", "GATEWAY"}:
             raise ValueError("BITGET_PAPER_EXTERNAL_TARGET_REQUIRED")
-        if self.mode == Mode.BITGET_PAPER and not self.target_url:
+        if self.mode in {Mode.PAPER, Mode.BITGET_PAPER} and self.target_id == "EXTERNAL_HTTP" and not self.target_url:
             raise ValueError("TARGET_URL_REQUIRED")
-        if self.mode == Mode.BITGET_PAPER and (not self.target_name or not self.target_model):
+        if self.mode in {Mode.PAPER, Mode.BITGET_PAPER} and self.target_id == "EXTERNAL_HTTP" and (not self.target_name or not self.target_model):
             raise ValueError("TARGET_IDENTITY_REQUIRED")
         return self
 
 
 class Run(StrictModel):
     id: str
+    agent_id: str | None = None
+    execution_provider: str | None = None
+    evidence_root: str | None = None
     target_id: str
     target_version: str
     target_name: str | None = None
@@ -236,6 +257,7 @@ class Scorecard(StrictModel):
 class VerificationSummary(StrictModel):
     status: Literal["NOT_APPLICABLE", "UNVERIFIED", "READY"]
     official_track2_ready: bool
+    execution_provider: str | None = None
     evidence: dict[str, bool] = Field(default_factory=dict)
     target_identity: dict[str, str | None] = Field(default_factory=dict)
     blocking_reasons: list[str] = Field(default_factory=list, max_length=20)
@@ -291,10 +313,13 @@ class Weakness(StrictModel):
 class Event(StrictModel):
     id: int | None = None
     run_id: str
+    sequence: int = Field(default=0, ge=0)
     episode_id: str | None = None
     type: str
     payload: dict[str, object] = Field(default_factory=dict)
     created_at: datetime
+    prev_hash: str = ""
+    entry_hash: str = ""
 
 
 class Episode(StrictModel):
@@ -320,3 +345,64 @@ class TargetListing(StrictModel):
     target_version: str
     kind: str
     target_url: str | None = None
+
+
+class AgentCreate(StrictModel):
+    name: str = Field(min_length=1, max_length=100)
+    version: str = Field(min_length=1, max_length=40)
+    declared_model: str = Field(min_length=1, max_length=100)
+    framework: str | None = Field(default=None, max_length=100)
+    protocol_version: str = Field(default="eva-agent/1", min_length=1, max_length=40)
+    capabilities: list[str] = Field(default_factory=list, max_length=20)
+    execution_providers: list[str] = Field(default_factory=list, max_length=20)
+    provider_capabilities: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class Agent(StrictModel):
+    agent_id: str
+    owner_id: str
+    name: str
+    version: str
+    declared_model: str
+    framework: str | None = None
+    created_at: datetime
+    last_seen_at: datetime | None = None
+    status: AgentStatus = AgentStatus.OFFLINE
+    capability_state: AgentCapabilityState = AgentCapabilityState.REGISTERED
+    protocol_version: str = "eva-agent/1"
+    capabilities: list[str] = Field(default_factory=list)
+    execution_providers: list[str] = Field(default_factory=list)
+    provider_capabilities: dict[str, list[str]] = Field(default_factory=dict)
+    evaluation_count: int = Field(default=0, ge=0)
+    latest_readiness: str | None = None
+    latest_evaluation_id: str | None = None
+
+
+class AgentKey(StrictModel):
+    key_id: str
+    agent_id: str
+    created_at: datetime
+    revoked_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
+class AgentRegistration(StrictModel):
+    agent: Agent
+    key: AgentKey
+    api_key: str
+
+
+class Certificate(StrictModel):
+    certificate_version: str
+    evaluation_id: str
+    agent_id: str
+    agent: dict[str, str]
+    score: int = Field(ge=0, le=100)
+    readiness: str
+    primary_weakness: str | None = None
+    evidence_root: str
+    completed_at: datetime
+    execution_provider: str | None = None
+    signing_key_id: str
+    public_key: str
+    signature: str

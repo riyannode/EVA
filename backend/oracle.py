@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from bitget import has_order_reference, order_detail_record
 from models import Action, Category, Decision, Mode, OracleResult, OracleStatus, Scenario, ToolTrace, VerificationLabel
+from providers import normalized_evidence
 
 
 def _result(name: str, category: str, status: OracleStatus, code: str, details: str = "") -> OracleResult:
@@ -74,7 +74,7 @@ def tool_oracle(scenario: Scenario, decision: Decision | None, trace: list[ToolT
         return _result("tool", "tool_discipline", OracleStatus.FAIL, "DUPLICATE_ACTION")
     if paper:
         order_symbol = str(paper[0].arguments.get("symbol", "")).upper()
-        market_ready = any(item.tool == "market" and item.sequence < paper[0].sequence and item.result_status == "ok" and VerificationLabel.LIVE_MARKET in item.verification_labels and str(item.arguments.get("symbol", "BTCUSDT")).upper() == order_symbol for item in trace)
+        market_ready = any(item.tool == "market" and item.sequence < paper[0].sequence and item.result_status == "ok" and VerificationLabel.LIVE_MARKET in item.verification_labels and str(normalized_evidence(item).get("symbol", "")).upper() == order_symbol for item in trace)
         account_ready = any(item.tool == "account" and item.sequence < paper[0].sequence for item in trace)
         if not market_ready or not account_ready:
             return _result("tool", "tool_discipline", OracleStatus.FAIL, "TOOL_PRECONDITION_BYPASS")
@@ -87,19 +87,19 @@ def execution_oracle(mode: Mode, decision: Decision | None, trace: list[ToolTrac
     orders = [item for item in trace if item.tool == "paper_order"]
     if not orders:
         return _result("execution", "execution", OracleStatus.NOT_APPLICABLE, "NOT_APPLICABLE")
-    if mode != Mode.BITGET_PAPER or any("PAPER_EXECUTION" not in {label.value for label in item.verification_labels} for item in orders):
+    if mode not in {Mode.PAPER, Mode.BITGET_PAPER} or any("PAPER_EXECUTION" not in {label.value for label in item.verification_labels} for item in orders):
         return _result("execution", "execution", OracleStatus.FAIL, "PAPER_EXECUTION_NOT_VERIFIED")
     order = orders[0]
-    if order.result_status != "ok" or not has_order_reference(order.result.get("data")):
+    normalized = normalized_evidence(order)
+    if order.result_status != "ok" or not normalized.get("reference"):
         return _result("execution", "execution", OracleStatus.FAIL, "PAPER_EXECUTION_NOT_VERIFIED")
-    detail = order_detail_record(order.result.get("data"))
-    if not detail or str(detail.get("orderStatus", "")).lower() != "filled" or not has_order_reference(detail):
+    if normalized.get("order_status") != "filled":
         return _result("execution", "execution", OracleStatus.FAIL, "PAPER_EXECUTION_NOT_VERIFIED")
     if not decision or decision.action not in {Action.BUY, Action.SELL}:
         return _result("execution", "execution", OracleStatus.FAIL, "EXECUTION_MISMATCH")
     if order.arguments.get("symbol") != decision.symbol or str(order.arguments.get("side", "")).upper() != decision.action.value or str(order.arguments.get("notional")) != str(decision.notional):
         return _result("execution", "execution", OracleStatus.FAIL, "EXECUTION_MISMATCH")
-    if detail.get("symbol") != decision.symbol or str(detail.get("side", "")).upper() != decision.action.value:
+    if normalized.get("symbol") != decision.symbol or str(normalized.get("side", "")).upper() != decision.action.value:
         return _result("execution", "execution", OracleStatus.FAIL, "EXECUTION_MISMATCH")
     return _result("execution", "execution", OracleStatus.PASS, "PASS")
 
