@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { completePairing, createEvaluation, createPairingRequest, getAgent, getOnboarding, getPairingRequest, type Agent, type AgentRegistration, type Onboarding, type PairingRequest, type Run } from "./api";
 
-type AgentsProps = { onEvaluationCreated: (run: Run) => void };
+export type AgentSummary = { agent: Agent; onboarding: Onboarding | null };
+type AgentsProps = { onEvaluationCreated: (run: Run) => void; onAgentStateChange: (value: AgentSummary | null) => void };
 
-export default function Agents({ onEvaluationCreated }: AgentsProps) {
+export default function Agents({ onEvaluationCreated, onAgentStateChange }: AgentsProps) {
   const [draft, setDraft] = useState({ name: "", version: "1.0.0", declared_model: "", framework: "", execution_providers: "" });
   const [pairing, setPairing] = useState<PairingRequest | null>(null);
   const [registration, setRegistration] = useState<AgentRegistration | null>(null);
@@ -13,6 +14,10 @@ export default function Agents({ onEvaluationCreated }: AgentsProps) {
   const [error, setError] = useState("");
   const [refreshRequested, setRefreshRequested] = useState(0);
   const completing = useRef(false);
+
+  useEffect(() => {
+    onAgentStateChange(agent && registration ? { agent, onboarding } : null);
+  }, [agent, onboarding, registration, onAgentStateChange]);
 
   useEffect(() => {
     if (!pairing || registration || pairing.status !== "PENDING") return;
@@ -99,6 +104,7 @@ export default function Agents({ onEvaluationCreated }: AgentsProps) {
     setOnboarding(null);
     setError("");
     completing.current = false;
+    onAgentStateChange(null);
   }
 
   const prompt = pairing ? `Connect my existing trading agent to EVA.\n\nPairing request: ${pairing.request_id}\n\nUse the EVA CLI or SDK. Check pairing status. After approval, store the returned agent credential in the runtime environment. Connect outbound using eva-agent/1. Run the non-financial connection test. Stop before PAPER evaluation.` : "";
@@ -113,7 +119,7 @@ export default function Agents({ onEvaluationCreated }: AgentsProps) {
       <div className="form-grid"><label>Version<input required maxLength={40} value={draft.version} onChange={event => setDraft(previous => ({ ...previous, version: event.target.value }))} /></label><label>Declared model<input required maxLength={100} value={draft.declared_model} onChange={event => setDraft(previous => ({ ...previous, declared_model: event.target.value }))} /></label></div>
       <label>Framework / runtime <small>optional</small><input maxLength={100} value={draft.framework} onChange={event => setDraft(previous => ({ ...previous, framework: event.target.value }))} /></label>
       <label>Trading venues / providers <small>optional · comma-separated</small><input maxLength={300} value={draft.execution_providers} onChange={event => setDraft(previous => ({ ...previous, execution_providers: event.target.value }))} placeholder="Bitget, Binance, or exchange-agnostic" /></label>
-      <p className="form-note">Provider metadata describes the agent only. It does not grant execution access. Synthetic evaluation is available without a venue.</p>
+      <p className="form-note">Provider info only describes the agent. It doesn’t allow execution. Synthetic evaluation works without a venue.</p>
       <button className="button primary submit-button" disabled={busy}>{busy ? "Creating request…" : "Create pairing request"}</button>
     </form></section>}
     {pairing && !registration && <section className="panel agents-card"><h2>Waiting for approval</h2><div className="agent-status-card"><span>Request</span><code>{pairing.request_id}</code><span>Status</span><strong>{pairing.status}</strong><span>Expires</span><time dateTime={pairing.expires_at}>{new Date(pairing.expires_at).toLocaleString("en-GB")}</time></div><label>Approval URL<input readOnly value={pairing.approval_url} /></label><div className="button-row"><button className="button" onClick={() => copy(pairing.approval_url)}>Copy URL</button><button className="button" onClick={() => copy(prompt)}>Copy AI Agent Prompt</button><button className="button" onClick={() => setRefreshRequested(value => value + 1)}>Refresh Status</button></div><label>AI Agent Prompt<textarea readOnly value={prompt} /></label><p className="form-note">An operator approves this request through the admin path. No agent privilege or credential exists while status is PENDING.</p></section>}

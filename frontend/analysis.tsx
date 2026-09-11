@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { Episode, EvaluationMetrics, Run, Scorecard, Verification, Weakness } from "./api";
 import { displayLabel as readable, runLabel, textParagraphs } from "./presentation";
 import { behavioralTone, filledOrderFields } from "./analysis-data";
+import Select from "./select";
 
 type View = "Summary" | "Test details" | "Learning" | "Paper evidence";
 type AnalysisProps = {
@@ -58,7 +59,7 @@ export default function Analysis({ runs, runId, run, episodes, score, metrics, w
   useEffect(() => { setView("Summary"); setEpisodeId(""); }, [runId]);
   function inspect(episode: Episode) { setEpisodeId(episode.id); setView("Test details"); }
   return <div className="analysis-page analysis-report">
-    <section className="page-heading analysis-heading"><div><h1>Analysis</h1><p>How your agent performed across safety tests.</p></div><label className="analysis-run-selector"><span>Evaluation</span><select aria-label="Select evaluation run" value={runId ?? ""} onChange={event => onRunChange(event.target.value)}><option value="" disabled>Select evaluation</option>{runs.map(item => <option key={item.id} value={item.id}>{runLabel(item)}</option>)}</select></label></section>
+    <section className="page-heading analysis-heading"><div><h1>Analysis</h1><p>How your agent performed across safety tests.</p></div><label className="analysis-run-selector"><span>Evaluation</span><Select ariaLabel="Select evaluation run" value={runId ?? ""} onChange={onRunChange} options={[{ value: "", label: "Select evaluation", disabled: true }, ...runs.map(item => ({ value: item.id, label: runLabel(item) }))]} /></label></section>
     {!run ? <div className="analysis-empty-inline">Select an evaluation to see its results.</div> : <>
       <div className="report-context"><strong>{run.target_name || readable(run.target_id)}</strong><span>{readable(run.mode)}</span><span className={`analysis-status ${run.status.toLowerCase()}`}><i />{readable(run.status)}</span><span>v{run.target_version}</span></div>
       <nav className="analysis-tabs" aria-label="Analysis views">{views.map(tab => <button key={tab} aria-current={view === tab ? "page" : undefined} onClick={() => setView(tab)}>{tab}</button>)}</nav>
