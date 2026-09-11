@@ -182,13 +182,15 @@ export default function App() {
       <div className="observatory-primary">
       {connection === "offline" && <div className="connection-notice"><span><strong>Backend disconnected.</strong> The office is idle. Run data will appear when the API is available.</span><button onClick={() => setRetry(value => value + 1)}>Reconnect</button></div>}
       {error && !configOpen && <p className="error" role="alert">{error}</p>}
-
       <section className="evaluation-context panel" aria-label="Selected evaluation">
         <label><span>Evaluation to watch</span><Select ariaLabel="Evaluation to watch" value={runId ?? ""} onChange={value => setRunId(value || null)} options={[{ value: "", label: "Select an evaluation" }, ...runs.map(item => ({ value: item.id, label: runLabel(item) }))]} /></label>
         <div><span>Test environment</span><strong>{run ? displayLabel(run.mode) : "No evaluation selected"}</strong></div>
         <div><span>Progress</span><strong>{run ? `${episodes.length} / ${run.max_episodes} test cases · ${displayLabel(run.status)}` : "Create an evaluation to begin"}</strong></div>
         <button className="button" disabled={!run} onClick={() => setView("analysis")}>Review results</button>
       </section>
+
+      </div>
+      <div className="observatory-stage">
       <div className="workspace">
         <section className="observatory panel" aria-labelledby="office-title">
           <div className="panel-heading"><h2 id="office-title"><span className="square-indicator" />Observatory</h2><div className="scene-controls"><span className="idle-label">{active ? `${stationForStage(stage)} active` : "Office on standby"}</span><button className="motion-button" aria-pressed={paused || reduced} onClick={() => setPaused(value => !value)} disabled={reduced}>{reduced ? "Reduced motion" : motion ? "Pause motion" : "Resume motion"}</button></div></div>
@@ -209,15 +211,6 @@ export default function App() {
           <div className="roster-note">Roles in one graph.<br />Not six independent traders.</div>
         </aside>
       </div>
-
-      <section className="telemetry" aria-label="Run summary">
-        <div><span>Readiness score</span><strong>{measured && score ? score.score : "—"}<small>/ 100</small></strong><p>{measured && score ? readable(score.label) : "Not measured yet"}</p></div>
-        <div><span>Test cases evaluated</span><strong>{run ? episodes.length.toString().padStart(2, "0") : "—"}<small>{run ? `/ ${run.max_episodes}` : "/ —"}</small></strong><p>{run ? readable(run.status) : "Waiting for an evaluation"}</p></div>
-        <div><span>Difficulty reached</span><strong>{run ? String(run.difficulty).padStart(2, "0") : "—"}<small>/ 05</small></strong><p>Difficulty increases after repeated passes</p></div>
-        <div><span>Observed failures</span><strong className={failures > 0 ? "failure-number" : ""}>{measured ? String(failures).padStart(2, "0") : "—"}</strong><p>{measured ? `${Math.round(failures / episodes.length * 100)}% of evaluated episodes` : "No results to grade"}</p></div>
-      </section>
-
-      </div>
       <section className="inspector panel" ref={inspector} aria-label="Run evidence">
         <div className="inspector-toolbar"><div className="tabs" role="tablist" aria-label="Evidence view">{tabs.map((value, index) => <button key={value} id={`tab-${value.replaceAll(" ", "-")}`} role="tab" tabIndex={tab === value ? 0 : -1} aria-selected={tab === value} aria-controls="evidence-panel" onClick={() => setTab(value)} onKeyDown={event => {
           const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
@@ -231,6 +224,13 @@ export default function App() {
           {tab === "Activity" && <><div className="feed-heading"><span>Graph event stream</span><span>{run ? stream === "connected" ? "SSE connected" : stream === "closed" ? "Stored run events" : "Stream reconnecting" : "Waiting for a run"}</span></div>{events.length ? <ol className="event-list">{[...events].reverse().map(event => <li key={event.id}><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString("en-GB")}</time><span className="event-type">{event.type}</span><details><summary>Inspect payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol> : <Empty title="A quiet office, for now.">Start an evaluation to see scenarios, decisions and oracle results arrive here.</Empty>}</>}
         </div>
       </section>
+      <section className="telemetry" aria-label="Run summary">
+        <div><span>Readiness score</span><strong>{measured && score ? score.score : "—"}<small>/ 100</small></strong><p>{measured && score ? readable(score.label) : "Not measured yet"}</p></div>
+        <div><span>Test cases evaluated</span><strong>{run ? episodes.length.toString().padStart(2, "0") : "—"}<small>{run ? `/ ${run.max_episodes}` : "/ —"}</small></strong><p>{run ? readable(run.status) : "Waiting for an evaluation"}</p></div>
+        <div><span>Difficulty reached</span><strong>{run ? String(run.difficulty).padStart(2, "0") : "—"}<small>/ 05</small></strong><p>Difficulty increases after repeated passes</p></div>
+        <div><span>Observed failures</span><strong className={failures > 0 ? "failure-number" : ""}>{measured ? String(failures).padStart(2, "0") : "—"}</strong><p>{measured ? `${Math.round(failures / episodes.length * 100)}% of evaluated episodes` : "No results to grade"}</p></div>
+      </section>
+      </div>
       <ActiveAgentCard summary={activeAgent} onOpen={() => setView("agents")} />
       <footer><span>EVA <span className="footer-divider">/</span> Adaptive trading-agent evaluation</span></footer></>}
     </main>
