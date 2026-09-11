@@ -6,6 +6,7 @@ const labels: Record<string, string> = {
   EXTERNAL_HTTP: "External trading agent",
   SYNTHETIC: "Synthetic test",
   BITGET_PAPER: "Bitget paper test",
+  PAPER: "Execution-backed paper test",
   policy: "Policy compliance",
   freshness: "Evidence freshness",
   sizing: "Order size limits",

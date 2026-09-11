@@ -1,4 +1,5 @@
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
@@ -8,16 +9,18 @@ from langgraph.graph import END, START, StateGraph
 
 import db
 import qwen
-from bitget import BitgetAdapter
 from config import Config
 from models import Category, CriticResult, Decision, Mode, OracleResult, RunStatus, Scenario, ToolTrace
 from oracle import evaluate, failure_type
+from providers import provider_for, provider_result
 from score import paper_verification, score
 from target import TargetResult, register_target, run_target
 
 
 class RunState(TypedDict, total=False):
     run_id: str
+    agent_id: str | None
+    execution_provider: str | None
     target_id: str
     target_version: str
     mode: str
@@ -91,10 +94,16 @@ def runtime_config() -> Config:
     return _CONFIG
 
 
+def evaluation_config(state: RunState) -> Config:
+    provider = state.get("execution_provider")
+    return replace(runtime_config(), execution_provider=provider or runtime_config().execution_provider)
+
+
 def load_run(state: RunState) -> RunState:
     run = db.get_run(db_path(state), state["run_id"])
-    state.update({"target_id": run.target_id, "target_version": run.target_version, "mode": run.mode.value, "status": RunStatus.RUNNING.value, "episode": run.episode, "max_episodes": run.max_episodes, "difficulty": run.difficulty, "scenario": None, "scenario_history": [], "recent_results": [], "mutation_attempts": 0, "started_at": (run.started_at or datetime.now(timezone.utc)).isoformat(), "updated_at": _stamp(), "weaknesses": [item.model_dump(mode="json") for item in db.get_weaknesses(db_path(state), run.target_id, run.target_version)]})
+    state.update({"target_id": run.target_id, "agent_id": run.agent_id, "execution_provider": run.execution_provider, "target_version": run.target_version, "mode": run.mode.value, "status": RunStatus.RUNNING.value, "episode": run.episode, "max_episodes": run.max_episodes, "difficulty": run.difficulty, "scenario": None, "scenario_history": [], "recent_results": [], "mutation_attempts": 0, "started_at": (run.started_at or datetime.now(timezone.utc)).isoformat(), "updated_at": _stamp(), "weaknesses": [item.model_dump(mode="json") for item in db.get_weaknesses(db_path(state), run.target_id, run.target_version)]})
     db.update_run(db_path(state), run.id, status=RunStatus.RUNNING, stage="LOAD_RUN", difficulty=run.difficulty)
+    db.add_event(db_path(state), run.id, "EVALUATION_STARTED", {"agent_id": run.agent_id, "execution_provider": run.execution_provider})
     db.add_event(db_path(state), run.id, "LOAD_RUN", {"status": RunStatus.RUNNING.value})
     return state
 
@@ -124,6 +133,7 @@ def choose_scenario(state: RunState) -> RunState:
     state.update({"episode": next_episode, "scenario": scenario.model_dump(mode="json"), "mutation_attempts": 0, "target_trace": [], "target_decision": None, "oracle_results": [], "critic_result": {}, "failure_type": None, "target_error": None, "consistency_decisions": [], "scenario_history": [*state.get("scenario_history", []), scenario.scenario_id]})
     db.update_run(db_path(state), state["run_id"], episode=next_episode, category=scenario.category.value, stage="CHOOSE_SCENARIO", difficulty=scenario.difficulty)
     db.add_event(db_path(state), state["run_id"], "SCENARIO_SELECTED", {"scenario_id": scenario.scenario_id, "category": scenario.category.value, "difficulty": scenario.difficulty, "labels": [item.value for item in scenario.source_labels]})
+    db.add_event(db_path(state), state["run_id"], "SCENARIO_CREATED", {"scenario_id": scenario.scenario_id, "parent_scenario_id": scenario.parent_scenario_id})
     return state
 
 
@@ -134,10 +144,12 @@ def _probe_scenario(scenario: Scenario) -> Scenario:
 def run_target_node(state: RunState) -> RunState:
     scenario = _scenario(state)
     target_url, target_token = target_for_run(state["run_id"])
-    if state["mode"] == Mode.BITGET_PAPER.value:
-        adapter = BitgetAdapter(runtime_config())
+    if state["mode"] in {Mode.PAPER.value, Mode.BITGET_PAPER.value}:
+        adapter = provider_for(evaluation_config(state))
         symbol, market = adapter.resolve_symbol(scenario.policy.allowed_symbols)
-        db.add_event(db_path(state), state["run_id"], "BITGET_SYMBOL_RESOLVED", {"symbol": symbol, "result": market or {}})
+        if market is not None and symbol:
+            market = provider_result(adapter, market, "market", {"symbol": symbol})
+        db.add_event(db_path(state), state["run_id"], "PROVIDER_SYMBOL_RESOLVED", {"provider": adapter.provider_id, "symbol": symbol, "result": market or {}})
         if symbol is None:
             state.update({"target_trace": [], "target_decision": None, "target_error": (market or {}).get("code") or "BITGET_MARKET_UNVERIFIED"})
             db.update_run(db_path(state), state["run_id"], stage="RUN_TARGET")
@@ -145,9 +157,18 @@ def run_target_node(state: RunState) -> RunState:
             return state
         scenario = scenario.model_copy(update={"policy": scenario.policy.model_copy(update={"allowed_symbols": [symbol]})})
         state["scenario"] = scenario.model_dump(mode="json")
-    result = run_target(state["target_id"], target_url, target_token, state["run_id"], f"{state['run_id']}-{state['episode']}", scenario, Mode(state["mode"]), runtime_config())
+    result = run_target(state["target_id"], target_url, target_token, state["run_id"], f"{state['run_id']}-{state['episode']}", scenario, Mode(state["mode"]), evaluation_config(state), state.get("agent_id"), db_path(state))
     state.update({"target_trace": [item.model_dump(mode="json") for item in result.trace], "target_decision": result.decision.model_dump(mode="json") if result.decision else None, "target_error": result.error})
     db.update_run(db_path(state), state["run_id"], stage="RUN_TARGET")
+    db.add_event(db_path(state), state["run_id"], "TARGET_CONNECTED", {"agent_id": state.get("agent_id"), "transport": "gateway" if state.get("agent_id") else "legacy_http"})
+    for item in result.trace:
+        db.add_event(db_path(state), state["run_id"], "TOOL_CALLED", {"tool": item.tool, "sequence": item.sequence, "arguments": item.arguments})
+        db.add_event(db_path(state), state["run_id"], "TOOL_RESULT", {"tool": item.tool, "sequence": item.sequence, "status": item.result_status, "provider": item.result.get("provider")})
+        if item.tool == "paper_order" and item.result_status == "ok":
+            db.add_event(db_path(state), state["run_id"], "PAPER_ORDER_SUBMITTED", {"provider": item.result.get("provider"), "reference": item.result.get("normalized", {}).get("reference") if isinstance(item.result.get("normalized"), dict) else None})
+            if "PAPER_EXECUTION" in {label.value for label in item.verification_labels}:
+                db.add_event(db_path(state), state["run_id"], "PAPER_ORDER_VERIFIED", {"provider": item.result.get("provider"), "reference": item.result.get("normalized", {}).get("reference") if isinstance(item.result.get("normalized"), dict) else None})
+    db.add_event(db_path(state), state["run_id"], "DECISION_RECEIVED", {"action": result.decision.action.value if result.decision else None})
     db.add_event(db_path(state), state["run_id"], "TARGET_COMPLETED", {"trace_steps": len(result.trace), "action": result.decision.action.value if result.decision else None, "error": result.error})
     return state
 
@@ -163,6 +184,7 @@ def run_oracles_node(state: RunState) -> RunState:
     results = evaluate(scenario, Mode(state["mode"]), decision, trace, consistency, state.get("target_error"))
     state.update({"oracle_results": [item.model_dump(mode="json") for item in results], "consistency_decisions": [item.model_dump(mode="json") if item else None for item in consistency], "failure_type": failure_type(results)})
     db.update_run(db_path(state), state["run_id"], stage="RUN_ORACLES", failure=state.get("failure_type"))
+    db.add_event(db_path(state), state["run_id"], "ORACLE_RESULT", {"failure_type": state.get("failure_type"), "results": [item.model_dump(mode="json") for item in results]})
     db.add_event(db_path(state), state["run_id"], "ORACLES_COMPLETED", {"failure_type": state.get("failure_type"), "results": [item.model_dump(mode="json") for item in results]})
     return state
 
@@ -171,6 +193,7 @@ def critic_node(state: RunState) -> RunState:
     value = qwen.critic(_scenario(state), _trace(state), _decision(state), _oracles(state), runtime_config())
     state["critic_result"] = value.model_dump(mode="json")
     db.update_run(db_path(state), state["run_id"], stage="CRITIC")
+    db.add_event(db_path(state), state["run_id"], "CRITIC_RESULT", {"failure_class": value.failure_class, "model": value.model})
     db.add_event(db_path(state), state["run_id"], "CRITIC_COMPLETED", {"failure_class": value.failure_class, "model": value.model})
     return state
 
@@ -184,6 +207,8 @@ def save_memory_node(state: RunState) -> RunState:
     state["recent_results"] = [*state.get("recent_results", []), result]
     state["weaknesses"] = [item.model_dump(mode="json") for item in db.get_weaknesses(db_path(state), run.target_id, run.target_version)]
     db.add_event(db_path(state), state["run_id"], "MEMORY_SAVED", {"episode_id": episode.id, "result": result, "failure_type": state.get("failure_type")}, episode.id)
+    if state.get("failure_type"):
+        db.add_event(db_path(state), state["run_id"], "WEAKNESS_UPDATED", {"failure_type": state["failure_type"], "category": scenario.category.value}, episode.id)
     return state
 
 
@@ -231,9 +256,13 @@ def finish_node(state: RunState) -> RunState:
     status = RunStatus.STOPPED if db.stop_requested(db_path(state), state["run_id"]) else RunStatus.COMPLETED
     run = db.get_run(db_path(state), state["run_id"])
     episodes = db.get_episodes(db_path(state), state["run_id"])
-    verification = paper_verification(run.mode, run.target_id, episodes, run.target_url, run.target_name, run.target_version, run.target_model)
+    verification = paper_verification(run.mode, run.target_id, episodes, run.target_url, run.target_name, run.target_version, run.target_model, run.execution_provider)
+    if run.agent_id:
+        db.record_agent_evaluation(db_path(state), run.agent_id, run.id, score(episodes).label)
     db.update_run(db_path(state), state["run_id"], status=status, stage="FINISH", failure=state.get("failure_type"), finished=True)
+    db.add_event(db_path(state), state["run_id"], "SCORE_CALCULATED", {"score": score(episodes).score, "readiness": score(episodes).label})
     db.add_event(db_path(state), state["run_id"], "RUN_VERIFICATION", verification.model_dump(mode="json"))
+    db.add_event(db_path(state), state["run_id"], "EVALUATION_COMPLETED", {"status": status.value, "evidence_root": db.get_run(db_path(state), state["run_id"]).evidence_root})
     db.add_event(db_path(state), state["run_id"], "RUN_FINISHED", {"status": status.value, "score": score(episodes).score, "official_track2_ready": verification.official_track2_ready, "verification_status": verification.status})
     state["status"] = status.value
     return state

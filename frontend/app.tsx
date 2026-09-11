@@ -4,7 +4,10 @@ import { createRun, eventUrl, getEpisodes, getRun, getRuns, getScore, getVerific
   getMetrics, type Episode, type EvaluationMetrics, type GraphEvent, type Run, type RunInput, type Scorecard, type Verification, type Weakness } from "./api";
 import { appendEvent, isActive, parseEvent, readable, stageForEvent, stationForStage, stations, stages, type StationId } from "./graph-view";
 import Analysis from "./analysis";
+import Agents, { type AgentSummary } from "./agents";
 import { displayLabel, runLabel } from "./presentation";
+import Select from "./select";
+import ScrollArea from "./scroll-area";
 
 const Office = lazy(() => import("./office"));
 const NightBackground = lazy(() => import("./night-background"));
@@ -19,6 +22,13 @@ function Avatar({ index, large = false }: { index: number; large?: boolean }) {
 
 function Empty({ title, children }: { title: string; children: React.ReactNode }) {
   return <div className="empty"><span className="empty-pixels" aria-hidden="true"><i /><i /><i /></span><strong>{title}</strong><p>{children}</p></div>;
+}
+
+function ActiveAgentCard({ summary, onOpen }: { summary: AgentSummary | null; onOpen: () => void }) {
+  if (!summary) return <section className="active-agent-card" aria-label="Active agent"><h2>NO AGENT CONNECTED</h2><p>Connect an external trading agent<br />to start an evaluation.</p><button type="button" onClick={onOpen}>Connect agent <span aria-hidden="true">→</span></button></section>;
+  const { agent, onboarding } = summary;
+  const paper = agent.capability_state !== "PAPER_ELIGIBLE" ? "LOCKED" : onboarding?.evaluation.paper ?? "NOT_SUPPORTED";
+  return <section className="active-agent-card" aria-label="Active agent"><h2>ACTIVE AGENT</h2><div className="active-agent-name"><strong>{agent.name}</strong><span className={`active-agent-connection ${agent.status.toLowerCase()}`}><i />{agent.status}</span></div><code>eva-agent/1</code><dl><div><dt>Synthetic</dt><dd>{onboarding?.evaluation.synthetic ?? "READY"}</dd></div><div><dt>Paper</dt><dd>{paper}</dd></div></dl><button type="button" onClick={onOpen}>View agent <span aria-hidden="true">→</span></button></section>;
 }
 
 export default function App() {
@@ -41,7 +51,8 @@ export default function App() {
   const [form, setForm] = useState<RunInput>(initialForm);
   const [busy, setBusy] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
-  const [view, setView] = useState<"observatory" | "analysis">("observatory");
+  const [activeAgent, setActiveAgent] = useState<AgentSummary | null>(null);
+  const [view, setView] = useState<"observatory" | "analysis" | "agents">("observatory");
   const [paused, setPaused] = useState(false);
   const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -159,26 +170,28 @@ export default function App() {
     <a className="skip-link" href="#main">Skip to workspace</a>
     <header className="app-header">
       <a className="brand" href="#main" aria-label="EVA workspace"><span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span><span>EVA</span></a>
-      <nav aria-label="Workspace navigation"><button className={view === "observatory" ? "nav-current" : ""} onClick={() => setView("observatory")}>Observatory</button><button className={view === "analysis" ? "nav-current" : ""} onClick={() => setView("analysis")}>Analysis</button></nav>
+      <nav aria-label="Workspace navigation"><button className={view === "observatory" ? "nav-current" : ""} onClick={() => setView("observatory")}>Observatory</button><button className={view === "analysis" ? "nav-current" : ""} onClick={() => setView("analysis")}>Analysis</button><button className={view === "agents" ? "nav-current" : ""} onClick={() => setView("agents")}>Agents</button></nav>
       <div className={`connection ${connection}`} role="status"><i />{connection === "online" ? "API connected" : connection === "connecting" ? "Connecting" : "API offline"}</div>
     </header>
-    <main id="main" className={view === "observatory" ? "observatory-layout" : undefined}>
-      {view === "analysis" ? <Analysis runs={runs} runId={runId} run={run} episodes={episodes} score={score} metrics={metrics} weaknesses={weaknesses} verification={verification} onRunChange={setRunId} /> : <>
+    <main id="main" className={view === "observatory" ? "observatory-layout" : view === "agents" ? "agents-layout" : undefined}>
+      {view === "analysis" ? <Analysis runs={runs} runId={runId} run={run} episodes={episodes} score={score} metrics={metrics} weaknesses={weaknesses} verification={verification} onRunChange={setRunId} /> : view === "agents" ? <Agents onEvaluationCreated={value => { setRuns(previous => [value, ...previous]); setRunId(value.id); setTab("Activity"); setView("observatory"); }} onAgentStateChange={setActiveAgent} /> : <>
       <section className="page-heading">
         <div><div className="breadcrumb">Workspace <span>/</span> Observatory</div><h1>Watch your agent being tested.</h1><p>Start an evaluation, follow each step, then review the results in Analysis.</p></div>
-        <button className="button primary" onClick={() => { setError(""); setConfigOpen(true); dialog.current?.showModal(); }}><span aria-hidden="true">+</span> New evaluation</button>
+        <div className="heading-actions"><button className="button primary" onClick={() => { setError(""); setConfigOpen(true); dialog.current?.showModal(); }}><span aria-hidden="true">+</span> New evaluation</button></div>
       </section>
 
       <div className="observatory-primary">
       {connection === "offline" && <div className="connection-notice"><span><strong>Backend disconnected.</strong> The office is idle. Run data will appear when the API is available.</span><button onClick={() => setRetry(value => value + 1)}>Reconnect</button></div>}
       {error && !configOpen && <p className="error" role="alert">{error}</p>}
-
       <section className="evaluation-context panel" aria-label="Selected evaluation">
-        <label><span>Evaluation to watch</span><select value={runId ?? ""} onChange={event => setRunId(event.target.value || null)}><option value="">Select an evaluation</option>{runs.map(value => <option key={value.id} value={value.id}>{runLabel(value)}</option>)}</select></label>
+        <label><span>Evaluation to watch</span><Select ariaLabel="Evaluation to watch" value={runId ?? ""} onChange={value => setRunId(value || null)} options={[{ value: "", label: "Select an evaluation" }, ...runs.map(item => ({ value: item.id, label: runLabel(item) }))]} /></label>
         <div><span>Test environment</span><strong>{run ? displayLabel(run.mode) : "No evaluation selected"}</strong></div>
         <div><span>Progress</span><strong>{run ? `${episodes.length} / ${run.max_episodes} test cases · ${displayLabel(run.status)}` : "Create an evaluation to begin"}</strong></div>
         <button className="button" disabled={!run} onClick={() => setView("analysis")}>Review results</button>
       </section>
+
+      </div>
+      <div className="observatory-stage">
       <div className="workspace">
         <section className="observatory panel" aria-labelledby="office-title">
           <div className="panel-heading"><h2 id="office-title"><span className="square-indicator" />Observatory</h2><div className="scene-controls"><span className="idle-label">{active ? `${stationForStage(stage)} active` : "Office on standby"}</span><button className="motion-button" aria-pressed={paused || reduced} onClick={() => setPaused(value => !value)} disabled={reduced}>{reduced ? "Reduced motion" : motion ? "Pause motion" : "Resume motion"}</button></div></div>
@@ -199,38 +212,37 @@ export default function App() {
           <div className="roster-note">Roles in one graph.<br />Not six independent traders.</div>
         </aside>
       </div>
-
-      <section className="telemetry" aria-label="Run summary">
-        <div><span>Readiness score</span><strong>{measured && score ? score.score : "—"}<small>/ 100</small></strong><p>{measured && score ? readable(score.label) : "Not measured yet"}</p></div>
-        <div><span>Test cases evaluated</span><strong>{run ? episodes.length.toString().padStart(2, "0") : "—"}<small>{run ? `/ ${run.max_episodes}` : "/ —"}</small></strong><p>{run ? readable(run.status) : "Waiting for an evaluation"}</p></div>
-        <div><span>Difficulty reached</span><strong>{run ? String(run.difficulty).padStart(2, "0") : "—"}<small>/ 05</small></strong><p>Difficulty increases after repeated passes</p></div>
-        <div><span>Observed failures</span><strong className={failures > 0 ? "failure-number" : ""}>{measured ? String(failures).padStart(2, "0") : "—"}</strong><p>{measured ? `${Math.round(failures / episodes.length * 100)}% of evaluated episodes` : "No results to grade"}</p></div>
-      </section>
-
-      </div>
       <section className="inspector panel" ref={inspector} aria-label="Run evidence">
         <div className="inspector-toolbar"><div className="tabs" role="tablist" aria-label="Evidence view">{tabs.map((value, index) => <button key={value} id={`tab-${value.replaceAll(" ", "-")}`} role="tab" tabIndex={tab === value ? 0 : -1} aria-selected={tab === value} aria-controls="evidence-panel" onClick={() => setTab(value)} onKeyDown={event => {
           const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
           if (next === null) return;
           event.preventDefault(); setTab(tabs[next]); document.getElementById(`tab-${tabs[next].replaceAll(" ", "-")}`)?.focus();
         }}>{value}{value === "Activity" && <span>{events.length}</span>}</button>)}</div>
-          <label className="run-select"><span className="sr-only">Select evaluation run</span><select value={runId ?? ""} onChange={event => setRunId(event.target.value || null)}><option value="">Select a run</option>{runs.map(value => <option key={value.id} value={value.id}>{runLabel(value)}</option>)}</select></label>
+          <label className="run-select"><span className="sr-only">Select evaluation run</span><Select ariaLabel="Select evaluation run" value={runId ?? ""} onChange={value => setRunId(value || null)} options={[{ value: "", label: "Select a run" }, ...runs.map(item => ({ value: item.id, label: runLabel(item) }))]} /></label>
           {isActive(run) && <button className="button stop-button" disabled={busy} onClick={() => void stop()}>Stop run</button>}
         </div>
         <div id="evidence-panel" role="tabpanel" aria-labelledby={`tab-${tab.replaceAll(" ", "-")}`}>
-          {tab === "Activity" && <><div className="feed-heading"><span>Graph event stream</span><span>{run ? stream === "connected" ? "SSE connected" : stream === "closed" ? "Stored run events" : "Stream reconnecting" : "Waiting for a run"}</span></div>{events.length ? <ol className="event-list">{[...events].reverse().map(event => <li key={event.id}><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString("en-GB")}</time><span className="event-type">{event.type}</span><details><summary>Inspect payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol> : <Empty title="A quiet office, for now.">Start an evaluation to see scenarios, decisions and oracle results arrive here.</Empty>}</>}
+          {tab === "Activity" && <><div className="feed-heading"><span>Graph event stream</span><span>{run ? stream === "connected" ? "SSE connected" : stream === "closed" ? "Stored run events" : "Stream reconnecting" : "Waiting for a run"}</span></div>{events.length ? <ScrollArea className="event-scroll"><ol className="event-list">{[...events].reverse().map(event => <li key={event.id}><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString("en-GB")}</time><span className="event-type">{event.type}</span><details><summary>Inspect payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol></ScrollArea> : <Empty title="A quiet office, for now.">Start an evaluation to see scenarios, decisions and oracle results arrive here.</Empty>}</>}
         </div>
       </section>
-      <footer><span>EVA <span className="footer-divider">/</span> Adaptive trading-agent evaluation</span><span>Qwen creates. Deterministic code grades.</span></footer></>}
+      <section className="telemetry" aria-label="Run summary">
+        <div><span>Readiness score</span><strong>{measured && score ? score.score : "—"}<small>/ 100</small></strong><p>{measured && score ? readable(score.label) : "Not measured yet"}</p></div>
+        <div><span>Test cases evaluated</span><strong>{run ? episodes.length.toString().padStart(2, "0") : "—"}<small>{run ? `/ ${run.max_episodes}` : "/ —"}</small></strong><p>{run ? readable(run.status) : "Waiting for an evaluation"}</p></div>
+        <div><span>Difficulty reached</span><strong>{run ? String(run.difficulty).padStart(2, "0") : "—"}<small>/ 05</small></strong><p>Difficulty increases after repeated passes</p></div>
+        <div><span>Observed failures</span><strong className={failures > 0 ? "failure-number" : ""}>{measured ? String(failures).padStart(2, "0") : "—"}</strong><p>{measured ? `${Math.round(failures / episodes.length * 100)}% of evaluated episodes` : "No results to grade"}</p></div>
+      </section>
+      </div>
+      <ActiveAgentCard summary={activeAgent} onOpen={() => setView("agents")} />
+      <footer><span>EVA <span className="footer-divider">/</span> Adaptive trading-agent evaluation</span></footer></>}
     </main>
 
     <dialog ref={dialog} className="run-dialog" aria-label="New evaluation configuration" onClose={() => { setError(""); setConfigOpen(false); }}>
       <form onSubmit={start}><div className="dialog-heading"><div><h2>New evaluation</h2><p>Choose the agent and the tests EVA will run.</p></div><button type="button" className="close-button" aria-label="Close configuration" onClick={() => dialog.current?.close()}>×</button></div>
-        <label>Evaluation mode<select value={form.mode} onChange={event => setForm(previous => ({ ...previous, mode: event.target.value as Run["mode"], ...(event.target.value === "BITGET_PAPER" ? { target_id: "EXTERNAL_HTTP" } : {}) }))}><option value="SYNTHETIC">Synthetic scenarios (no exchange orders)</option><option value="BITGET_PAPER">Bitget demo account (paper orders)</option></select></label>
-        <label>Target agent<select value={form.target_id} onChange={event => setForm(previous => ({ ...previous, target_id: event.target.value }))}><option value="REFERENCE_SAFE" disabled={form.mode === "BITGET_PAPER"}>Safety-focused reference agent</option><option value="REFERENCE_WEAK" disabled={form.mode === "BITGET_PAPER"}>Weak reference agent</option><option value="EXTERNAL_HTTP">Your external trading agent</option></select></label>
+        <label>Evaluation mode<Select ariaLabel="Evaluation mode" value={form.mode} onChange={value => setForm(previous => ({ ...previous, mode: value as Run["mode"], ...(value === "BITGET_PAPER" ? { target_id: "EXTERNAL_HTTP" } : {}) }))} options={[{ value: "SYNTHETIC", label: "Synthetic scenarios (no exchange orders)" }, { value: "BITGET_PAPER", label: "Bitget demo account (paper orders)" }]} /></label>
+        <label>Target agent<Select ariaLabel="Target agent" value={form.target_id} onChange={value => setForm(previous => ({ ...previous, target_id: value }))} options={[{ value: "REFERENCE_SAFE", label: "Safety-focused reference agent", disabled: form.mode === "BITGET_PAPER" }, { value: "REFERENCE_WEAK", label: "Weak reference agent", disabled: form.mode === "BITGET_PAPER" }, { value: "EXTERNAL_HTTP", label: "Your external trading agent" }]} /></label>
         {form.target_id === "EXTERNAL_HTTP" && <><label>Agent endpoint URL<input type="url" required value={form.target_url ?? ""} onChange={event => setForm(previous => ({ ...previous, target_url: event.target.value }))} placeholder="http://127.0.0.1:9000/agent" /></label><div className="form-grid"><label>Agent name<input required value={form.target_name ?? ""} maxLength={100} onChange={event => setForm(previous => ({ ...previous, target_name: event.target.value }))} /></label><label>Agent model name<input required value={form.target_model ?? ""} maxLength={100} onChange={event => setForm(previous => ({ ...previous, target_model: event.target.value }))} /></label></div><label>Bearer token <small>optional · not stored in the browser</small><input type="password" autoComplete="off" value={form.target_token ?? ""} maxLength={500} onChange={event => setForm(previous => ({ ...previous, target_token: event.target.value }))} /></label></>}
         <div className="form-grid"><label>Agent version<input required maxLength={40} value={form.target_version} onChange={event => setForm(previous => ({ ...previous, target_version: event.target.value }))} /></label><label>Maximum test cases<input type="number" min={1} max={100} required value={form.max_episodes} onChange={event => setForm(previous => ({ ...previous, max_episodes: Number(event.target.value) }))} /></label></div>
-        <label>Starting difficulty<select value={form.difficulty} onChange={event => setForm(previous => ({ ...previous, difficulty: Number(event.target.value) }))}>{[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>Level {value}</option>)}</select></label>
+        <label>Starting difficulty<Select ariaLabel="Starting difficulty" value={String(form.difficulty)} onChange={value => setForm(previous => ({ ...previous, difficulty: Number(value) }))} options={[1, 2, 3, 4, 5].map(value => ({ value: String(value), label: `Level ${value}` }))} /></label>
         <p className="form-note">{form.mode === "BITGET_PAPER" ? "EVA tests your external agent using Bitget demo funds. Enter the agent endpoint and the model it declares." : "Reference agents are built-in test examples. Choose an external agent to evaluate your own model. Synthetic tests do not place exchange orders."}</p>
         {error && <p className="error" role="alert">{error}</p>}
         <button className="button primary submit-button" disabled={busy}>{busy ? "Creating run…" : "Start evaluation"}</button>

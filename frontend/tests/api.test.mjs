@@ -48,3 +48,20 @@ test("no obsolete financial-write API exports remain", () => {
   assert.equal("previewLiveOrder" in api, false);
   assert.equal("getTradingStatus" in api, false);
 });
+
+test("pairing API uses public request and one-time exchange routes", async () => {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify({ request_id: "pair_test", status: "PENDING", expires_at: "2026-01-01T00:00:00Z", approval_url: "https://eva.test/pair" }));
+  };
+  try {
+    await api.createPairingRequest({ name: "TraderX", version: "1.0.0", declared_model: "model-v1" });
+    await api.getPairingRequest("pair_test");
+    await api.completePairing("pair_test");
+    assert.deepEqual(calls.map(call => new URL(call.url).pathname), ["/v1/pairing-requests", "/v1/pairing-requests/pair_test", "/v1/pairing-requests/pair_test/exchange"]);
+    assert.equal(calls[0].init.headers.Authorization, undefined);
+    assert.equal(calls[2].init.method, "POST");
+  } finally { globalThis.fetch = original; }
+});

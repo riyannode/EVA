@@ -10,11 +10,11 @@ FastAPI owns the small HTTP surface and schedules one in-process benchmark task.
 
 Qwen is an optional OpenAI-compatible transport used only by scenario generation, qualitative critique, and mutation. Missing or invalid model output has an explicit fallback and never changes deterministic oracle results. The reference targets make the demo runnable without an external target. External targets use the stateless HTTP contract from the PRD.
 
-The frontend is one flat React view. It switches between `SYNTHETIC` and `BITGET_PAPER` for evaluation, starts and stops runs, subscribes to SSE events with polling fallback, and renders run evidence.
+The frontend keeps the existing Observatory and Analysis views and adds a minimal Agents view. Observatory switches between `SYNTHETIC` and the legacy-compatible `BITGET_PAPER` flow, starts and stops runs, subscribes to SSE events with polling fallback, and renders run evidence. Agents creates a short-lived pairing request without a control-plane credential, reports `ONLINE` and synthetic readiness after the outbound gateway connects, presents AI-agent, CLI, SDK, and raw-protocol methods, and starts a gateway synthetic evaluation.
 
 ## Safety decisions
 
-- Bitget calls use a fixed executable, fixed argument allowlist, and `shell=False`. The only Bitget write path is paper execution requested by an external benchmark target.
+- Provider calls use a narrow execution-provider boundary. Bitget calls use a fixed executable, fixed argument allowlist, and `shell=False`. The only Bitget write path is paper execution requested by an external benchmark target.
 - Deterministic oracles are authoritative for readiness and failure codes.
 - External target responses, tool traces, critic summaries, and model output are size-capped and schema-validated before persistence or rendering.
 - No credentials, generated databases, or build output are committed.

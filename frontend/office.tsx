@@ -16,10 +16,6 @@ type OfficeProps = {
 };
 
 const positions = deskPositions;
-type CameraView = "Orbit" | "Top" | "Front" | "Side";
-const cameraViews: Record<CameraView, [number, number, number]> = {
-  Orbit: [15, 20, 25], Top: [0, 32, 0.01], Front: [0, 9, 32], Side: [32, 10, 0],
-};
 
 export default function Office({ active, selected, events, running, motion, onSelect }: OfficeProps) {
   const mount = useRef<HTMLDivElement>(null);
@@ -27,9 +23,6 @@ export default function Office({ active, selected, events, running, motion, onSe
   const current = useRef({ active, selected, events, running, motion });
   current.current = { active, selected, events, running, motion };
   const [unavailable, setUnavailable] = useState(false);
-  const [cameraView, setCameraView] = useState<CameraView | "Custom">("Orbit");
-  const moveCamera = useRef<(view: CameraView) => void>(() => {});
-  const zoomCamera = useRef<(factor: number) => void>(() => {});
 
   useEffect(() => {
     const host = mount.current;
@@ -58,23 +51,6 @@ export default function Office({ active, selected, events, running, motion, onSe
     controls.minZoom = 0.65;
     controls.maxZoom = 2;
     controls.update();
-    let cameraTween: ReturnType<typeof animate> | null = null;
-    moveCamera.current = view => {
-      cameraTween?.cancel();
-      const [x, y, z] = cameraViews[view];
-      camera.zoom = 1;
-      camera.updateProjectionMatrix();
-      if (current.current.motion) cameraTween = animate(camera.position, {
-        x, y, z, duration: 450, ease: "outCubic", onUpdate: () => controls.update(),
-      });
-      else { camera.position.set(x, y, z); controls.update(); }
-    };
-    zoomCamera.current = factor => {
-      camera.zoom = THREE.MathUtils.clamp(camera.zoom * factor, controls.minZoom, controls.maxZoom);
-      camera.updateProjectionMatrix();
-    };
-    const onOrbit = () => { cameraTween?.cancel(); setCameraView("Custom"); };
-    controls.addEventListener("start", onOrbit);
     scene.add(new THREE.AmbientLight(0xb7c9e8, 1.7));
     const sun = new THREE.DirectionalLight(0xffe0bb, 3.2);
     sun.position.set(-5, 15, 10);
@@ -325,7 +301,7 @@ export default function Office({ active, selected, events, running, motion, onSe
       if (time - lastFrame < 33) return;
       lastFrame = time;
       const state = current.current;
-      if (previousMotion && !state.motion) { resetActors(); queue = []; cameraTween?.cancel(); }
+      if (previousMotion && !state.motion) { resetActors(); queue = []; }
       previousMotion = state.motion;
       if (!state.running || !state.motion) {
         resetActors();
@@ -363,18 +339,13 @@ export default function Office({ active, selected, events, running, motion, onSe
       event.preventDefault();
       failed = true;
       resetActors();
-      cameraTween?.cancel();
       setUnavailable(true);
     };
     renderer.domElement.addEventListener("webglcontextlost", onLost);
     return () => {
       cancelAnimationFrame(frame);
       resetActors();
-      cameraTween?.cancel();
-      controls.removeEventListener("start", onOrbit);
       controls.dispose();
-      moveCamera.current = () => {};
-      zoomCamera.current = () => {};
       visibility.disconnect();
       observer.disconnect();
       renderer.domElement.removeEventListener("webglcontextlost", onLost);
@@ -387,11 +358,6 @@ export default function Office({ active, selected, events, running, motion, onSe
 
   return <div className={`office ${unavailable ? "office-unavailable" : ""}`}>
     <div ref={mount} className="office-canvas" role="group" aria-label="3D evaluation floor. Drag to rotate; scroll or pinch to zoom." />
-    {!unavailable && <div className="camera-toolbar" aria-label="Office camera controls">
-      <div className="camera-presets">{(Object.keys(cameraViews) as CameraView[]).map(view => <button key={view} aria-pressed={cameraView === view} onClick={() => { setCameraView(view); moveCamera.current(view); }}>{view === "Orbit" ? "Reset view" : view}</button>)}</div>
-      <div className="camera-zoom"><button aria-label="Zoom out" onClick={() => zoomCamera.current(1 / 1.2)}>−</button><button aria-label="Zoom in" onClick={() => zoomCamera.current(1.2)}>+</button></div>
-      <small>Drag to rotate · Scroll or pinch to zoom</small>
-    </div>}
     {unavailable && <p className="office-fallback">3D view unavailable. Select a station below.</p>}
     <div className="office-labels" aria-label="Evaluation stations">
       {stations.map((station, index) => <button key={station.id} ref={element => { labels.current[index] = element; }}

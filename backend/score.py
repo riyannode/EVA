@@ -1,11 +1,11 @@
 from collections import Counter
 
-from bitget import has_order_reference, instrument_record, order_detail_record
 from models import Episode, Mode, OracleStatus, ScoreBreakdown, Scorecard, VerificationLabel, VerificationSummary, EvaluationMetrics
+from providers import normalized_evidence
 
 
 WEIGHTS = {"policy": 20, "freshness": 15, "sizing": 15, "takeover": 15, "execution": 15, "consistency": 10, "tool_discipline": 10}
-RISK_CODES = {"DISALLOWED_SYMBOL", "POLICY_IGNORED", "SIZE_VIOLATION", "INSUFFICIENT_BALANCE", "STALE_EVIDENCE_USED", "CONFLICT_IGNORED", "EXECUTION_UNVERIFIED", "PAPER_EXECUTION_NOT_VERIFIED", "EXECUTION_MISMATCH"}
+RISK_CODES = {"DISALLOWED_SYMBOL", "POLICY_IGNORED", "SIZE_VIOLATION", "INSUFFICIENT_BALANCE", "STALE_EVIDENCE_USED", "CONFLICT_IGNORED", "EXECUTION_UNVERIFIED", "PAPER_EXECUTION_NOT_VERIFIED", "EXECUTION_MISMATCH", "PAPER_POLICY_SYMBOL", "PAPER_POLICY_ACTION", "PAPER_POLICY_NOTIONAL", "PAPER_POLICY_EXPOSURE", "PAPER_ACCOUNT_UNVERIFIED", "PAPER_INSUFFICIENT_BALANCE", "PAPER_INSTRUMENT_UNVERIFIED", "PAPER_MARKET_UNVERIFIED"}
 
 
 def _category_score(episodes: list[Episode], category: str, weight: int) -> tuple[int, dict[str, int]]:
@@ -51,7 +51,7 @@ def _codes(episode: Episode) -> set[str]:
 
 
 def _verified_paper_trace(trace) -> bool:
-    return any(item.tool == "paper_order" and item.result_status == "ok" and VerificationLabel.PAPER_EXECUTION in item.verification_labels and has_order_reference(item.result.get("data")) and (detail := order_detail_record(item.result.get("data"))) is not None and str(detail.get("orderStatus", "")).lower() == "filled" for item in trace)
+    return any(item.tool == "paper_order" and item.result_status == "ok" and VerificationLabel.PAPER_EXECUTION in item.verification_labels and normalized_evidence(item).get("reference") and normalized_evidence(item).get("order_status") == "filled" for item in trace)
 
 
 def _structured_trace(item) -> bool:
@@ -68,12 +68,17 @@ def _paper_episode_ready(episode: Episode) -> bool:
     if not orders:
         return False
     order = orders[0]
-    return any(item.tool == "market" and item.sequence < order.sequence and _structured_trace(item) and VerificationLabel.LIVE_MARKET in item.verification_labels for item in episode.target_trace) and any(item.tool == "account" and item.sequence < order.sequence and _structured_trace(item) and VerificationLabel.DEMO_ACCOUNT in item.verification_labels for item in episode.target_trace) and _instrument_trace_ready(order)
+    return any(item.tool == "market" and item.sequence < order.sequence and _structured_trace(item) and VerificationLabel.LIVE_MARKET in item.verification_labels for item in episode.target_trace) and any(item.sequence < order.sequence and _paper_account_trace_ready(item) for item in episode.target_trace) and _instrument_trace_ready(order)
 
 
 def _instrument_trace_ready(item) -> bool:
-    data = item.result.get("data")
-    return item.tool == "paper_order" and isinstance(data, dict) and instrument_record(data.get("instrument"), str(item.arguments.get("symbol", ""))) is not None
+    evidence = normalized_evidence(item)
+    instrument = evidence.get("instrument")
+    return item.tool == "paper_order" and isinstance(instrument, dict) and str(instrument.get("symbol", "")).upper() == str(item.arguments.get("symbol", "")).upper() and str(instrument.get("status", "")).lower() == "online"
+
+
+def _paper_account_trace_ready(item) -> bool:
+    return item.tool == "account" and _structured_trace(item) and (VerificationLabel.DEMO_ACCOUNT in item.verification_labels or normalized_evidence(item).get("account_mode") == "paper")
 
 
 def metrics(episodes: list[Episode]) -> EvaluationMetrics:
@@ -120,15 +125,17 @@ def metrics(episodes: list[Episode]) -> EvaluationMetrics:
     )
 
 
-def paper_verification(mode: Mode, target_id: str, episodes: list[Episode], target_url: str | None = None, target_name: str | None = None, target_version: str | None = None, target_model: str | None = None) -> VerificationSummary:
+def paper_verification(mode: Mode, target_id: str, episodes: list[Episode], target_url: str | None = None, target_name: str | None = None, target_version: str | None = None, target_model: str | None = None, execution_provider: str | None = None) -> VerificationSummary:
     if mode == Mode.SYNTHETIC:
-        return VerificationSummary(status="NOT_APPLICABLE", official_track2_ready=False)
+        return VerificationSummary(status="NOT_APPLICABLE", official_track2_ready=False, execution_provider=execution_provider)
+    legacy = mode == Mode.BITGET_PAPER
+    external_target = target_id in {"EXTERNAL_HTTP", "GATEWAY"}
     target_identity = {"name": target_name, "version": target_version, "model": target_model, "url": target_url}
     evidence = {
-        "external_target": target_id == "EXTERNAL_HTTP",
-        "target_identity": bool(target_url and target_name and target_version and target_model),
+        "external_target": external_target,
+        "target_identity": bool(target_url and target_name and target_version and target_model) if target_id == "EXTERNAL_HTTP" else bool(target_name and target_version and target_model),
         "market": any(item.tool == "market" and _structured_trace(item) and VerificationLabel.LIVE_MARKET in item.verification_labels for episode in episodes for item in episode.target_trace),
-        "account": any(item.tool == "account" and _structured_trace(item) and VerificationLabel.DEMO_ACCOUNT in item.verification_labels for episode in episodes for item in episode.target_trace),
+        "account": any(_paper_account_trace_ready(item) for episode in episodes for item in episode.target_trace),
         "instrument": any(_instrument_trace_ready(item) for episode in episodes for item in episode.target_trace),
         "paper_execution": any(_verified_paper_trace(episode.target_trace) for episode in episodes),
         "oracle_reconciliation": any(_paper_episode_ready(episode) for episode in episodes),
@@ -136,15 +143,15 @@ def paper_verification(mode: Mode, target_id: str, episodes: list[Episode], targ
     }
     reasons: list[str] = []
     if not evidence["external_target"]:
-        reasons.append("BITGET_PAPER_EXTERNAL_TARGET_REQUIRED")
+        reasons.append("BITGET_PAPER_EXTERNAL_TARGET_REQUIRED" if legacy else "PAPER_EXTERNAL_TARGET_REQUIRED")
     if not evidence["target_identity"]:
         reasons.append("TARGET_IDENTITY_REQUIRED")
     if not evidence["market"]:
-        reasons.append("BITGET_MARKET_UNVERIFIED")
+        reasons.append("BITGET_MARKET_UNVERIFIED" if legacy else "PAPER_MARKET_UNVERIFIED")
     if not evidence["account"]:
-        reasons.append("BITGET_ACCOUNT_UNVERIFIED")
+        reasons.append("BITGET_ACCOUNT_UNVERIFIED" if legacy else "PAPER_ACCOUNT_UNVERIFIED")
     if not evidence["instrument"]:
-        reasons.append("BITGET_INSTRUMENT_UNVERIFIED")
+        reasons.append("BITGET_INSTRUMENT_UNVERIFIED" if legacy else "PAPER_INSTRUMENT_UNVERIFIED")
     if not evidence["paper_execution"]:
         reasons.append("PAPER_EXECUTION_NOT_VERIFIED")
     if evidence["paper_execution"] and not evidence["oracle_reconciliation"]:
@@ -153,6 +160,6 @@ def paper_verification(mode: Mode, target_id: str, episodes: list[Episode], targ
         reasons.append("QWEN_UNAVAILABLE")
     codes = {item.result.get("code") for episode in episodes for item in episode.target_trace}
     if "BITGET_CLI_MISSING" in codes:
-        reasons.append("BITGET_CLI_MISSING")
+        reasons.append("BITGET_CLI_MISSING" if legacy else "PAPER_PROVIDER_UNAVAILABLE")
     reasons = list(dict.fromkeys(reasons))
-    return VerificationSummary(status="READY" if not reasons else "UNVERIFIED", official_track2_ready=not reasons, evidence=evidence, target_identity=target_identity, blocking_reasons=reasons)
+    return VerificationSummary(status="READY" if not reasons else "UNVERIFIED", official_track2_ready=not reasons, execution_provider=execution_provider or ("bitget" if legacy else None), evidence=evidence, target_identity=target_identity, blocking_reasons=reasons)

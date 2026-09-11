@@ -2,14 +2,16 @@ import json
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Sequence
 
 from config import Config
 from models import Mode, VerificationLabel
+from provider import ExecutionProvider, ProviderError
 
 
-class BitgetError(RuntimeError):
+class BitgetError(ProviderError):
     pass
 
 
@@ -107,6 +109,68 @@ def order_detail_record(value: object) -> dict[str, object] | None:
     return None
 
 
+def _string_field(value: object, keys: set[str]) -> str | None:
+    if isinstance(value, dict):
+        for key in keys:
+            item = value.get(key)
+            if item is not None and str(item).strip():
+                return str(item)
+        for item in value.values():
+            result = _string_field(item, keys)
+            if result is not None:
+                return result
+    elif isinstance(value, list):
+        for item in value:
+            result = _string_field(item, keys)
+            if result is not None:
+                return result
+    return None
+
+
+def normalize_response(value: dict[str, object], tool: str, arguments: dict[str, object] | None = None, observed_at: str | None = None) -> dict[str, object]:
+    args = arguments or {}
+    raw = value.get("data")
+    normalized: dict[str, object] = {"provider": "bitget", "tool": tool}
+    if observed_at:
+        normalized["observed_at"] = observed_at
+    if tool == "market":
+        normalized["symbol"] = str(args.get("symbol") or _string_field(raw, {"symbol"}) or "").upper()
+        price = market_price(raw)
+        if price is not None:
+            normalized["market_price"] = format(price, "f")
+    elif tool == "account":
+        if "DEMO_ACCOUNT" in {str(item) for item in value.get("labels", [])}:
+            normalized["account_mode"] = "paper"
+        balance = _decimal_field(raw, {"balance", "equity", "totalBalance"})
+        available = _decimal_field(raw, {"availableBalance", "available", "availableEq"})
+        if balance is not None:
+            normalized["balance"] = format(balance, "f")
+        if available is not None:
+            normalized["available_balance"] = format(available, "f")
+    elif tool == "instrument":
+        symbol = str(args.get("symbol") or _string_field(raw, {"symbol"}) or "").upper()
+        record = instrument_record(raw, symbol)
+        if record:
+            normalized.update({"symbol": symbol, "status": str(record.get("status", "")).lower()})
+            for source, target in (("quantityPrecision", "quantity_precision"), ("quotePrecision", "quote_precision"), ("minOrderAmount", "min_order_amount")):
+                if source in record:
+                    normalized[target] = str(record[source])
+    elif tool == "paper_order":
+        detail = order_detail_record(raw.get("order_detail") if isinstance(raw, dict) else raw)
+        reference = order_reference(raw)
+        if reference:
+            normalized["reference_type"], normalized["reference"] = reference
+        if detail:
+            normalized.update({"symbol": str(detail.get("symbol") or args.get("symbol") or "").upper(), "side": str(detail.get("side") or args.get("side") or "").upper(), "order_status": str(detail.get("orderStatus", "")).lower()})
+            for source, target in (("cumExecQty", "executed_quantity"), ("cumExecValue", "executed_value"), ("avgPrice", "average_price"), ("fee", "fee")):
+                if source in detail:
+                    normalized[target] = str(detail[source])
+        instrument = raw.get("instrument") if isinstance(raw, dict) else None
+        if isinstance(instrument, dict):
+            normalized["instrument"] = {key: instrument[key] for key in ("symbol", "status", "quantityPrecision", "quotePrecision", "minOrderAmount") if key in instrument}
+    return normalized
+
+
 def paper_order_contract_ready(value: dict[str, object] | None) -> bool:
     if not value or not structured_result(value):
         return False
@@ -179,26 +243,40 @@ def _paper_qty(side: str, notional: Decimal, market_result: dict[str, object] | 
     return _decimal_text(quantity), record
 
 
-class BitgetAdapter:
+class BitgetAdapter(ExecutionProvider):
+    provider_id = "bitget"
+
     def __init__(self, config: Config):
         self.config = config
+
+    def capabilities(self) -> list[str]:
+        return ["market", "account", "history", "instrument", "paper_order", "paper_order_detail"]
+
+    def normalize_result(self, value: dict[str, object], tool: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
+        return normalize_response(value, tool, arguments)
+
+    @staticmethod
+    def _annotate(result: dict[str, object], tool: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
+        result["provider"] = "bitget"
+        result["normalized"] = normalize_response(result, tool, arguments, datetime.now(timezone.utc).isoformat())
+        return result
 
     def _run(self, args: Sequence[str], labels: list[str] | None = None) -> dict[str, object]:
         command = [self.config.bitget_executable, *args]
         try:
             result = subprocess.run(command, shell=False, capture_output=True, text=True, timeout=10, check=False)
         except FileNotFoundError:
-            return {"status": "unverified", "code": "BITGET_CLI_MISSING", "labels": [VerificationLabel.UNVERIFIED.value]}
+            return {"status": "unverified", "provider": self.provider_id, "code": "BITGET_CLI_MISSING", "labels": [VerificationLabel.UNVERIFIED.value]}
         except subprocess.TimeoutExpired:
-            return {"status": "unverified", "code": "BITGET_TIMEOUT", "labels": [VerificationLabel.UNVERIFIED.value]}
+            return {"status": "unverified", "provider": self.provider_id, "code": "BITGET_TIMEOUT", "labels": [VerificationLabel.UNVERIFIED.value]}
         if result.returncode != 0:
-            return {"status": "error", "code": "BITGET_COMMAND_FAILED", "labels": [VerificationLabel.UNVERIFIED.value]}
+            return {"status": "error", "provider": self.provider_id, "code": "BITGET_COMMAND_FAILED", "labels": [VerificationLabel.UNVERIFIED.value]}
         raw = result.stdout[:200000]
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
             data = {"output": raw[:1000]}
-        return {"status": "ok", "data": data, "labels": labels or []}
+        return {"status": "ok", "provider": self.provider_id, "data": data, "labels": labels or []}
 
     @staticmethod
     def _symbol(value: str) -> str:
@@ -214,16 +292,19 @@ class BitgetAdapter:
         return self._run(["discover", "--tool", "order", "--action", "place"])
 
     def market_ticker(self, symbol: str) -> dict[str, object]:
-        return self._run(["--read-only", "market", "--action", "tickers", "--category", "SPOT", "--symbol", self._symbol(symbol)], [VerificationLabel.LIVE_MARKET.value])
+        symbol = self._symbol(symbol)
+        return self._annotate(self._run(["--read-only", "market", "--action", "tickers", "--category", "SPOT", "--symbol", symbol], [VerificationLabel.LIVE_MARKET.value]), "market", {"symbol": symbol})
 
     def candles(self, symbol: str, interval: str = "1m") -> dict[str, object]:
         interval = _INTERVAL_ALIASES.get(interval, interval)
         if interval not in _INTERVALS:
             raise BitgetError("INVALID_INTERVAL")
-        return self._run(["--read-only", "market", "--action", "candles", "--category", "SPOT", "--symbol", self._symbol(symbol), "--interval", interval], [VerificationLabel.LIVE_MARKET.value])
+        symbol = self._symbol(symbol)
+        return self._annotate(self._run(["--read-only", "market", "--action", "candles", "--category", "SPOT", "--symbol", symbol, "--interval", interval], [VerificationLabel.LIVE_MARKET.value]), "history", {"symbol": symbol, "interval": interval})
 
     def instrument(self, symbol: str) -> dict[str, object]:
-        return self._run(["--read-only", "market", "--action", "instruments", "--category", "SPOT", "--symbol", self._symbol(symbol)])
+        symbol = self._symbol(symbol)
+        return self._annotate(self._run(["--read-only", "market", "--action", "instruments", "--category", "SPOT", "--symbol", symbol]), "instrument", {"symbol": symbol})
 
     def account(self) -> dict[str, object]:
         mode = "--paper-trading" if self.config.bitget_mode == "paper" else "--read-only"
@@ -234,7 +315,7 @@ class BitgetAdapter:
             result["status"] = "unverified"
             result["code"] = "BITGET_ACCOUNT_UNVERIFIED"
             result["labels"] = [VerificationLabel.UNVERIFIED.value]
-        return result
+        return self._annotate(result, "account")
 
     def resolve_symbol(self, allowed_symbols: Sequence[str]) -> tuple[str | None, dict[str, object] | None]:
         last_result: dict[str, object] | None = None
@@ -249,11 +330,11 @@ class BitgetAdapter:
     def paper_order_detail(self, reference_key: str, reference: str) -> dict[str, object]:
         if reference_key not in _ORDER_KEYS:
             raise BitgetError("PAPER_EXECUTION_NOT_VERIFIED")
-        return self._run(["--paper-trading", "order", "--action", "detail", f"--{reference_key}", reference])
+        return self._annotate(self._run(["--paper-trading", "order", "--action", "detail", f"--{reference_key}", reference]), "paper_order", {"reference_type": reference_key, "reference": reference})
 
     def paper_order(self, symbol: str, side: str, notional: Decimal, market_result: dict[str, object] | None = None, instrument_result: dict[str, object] | None = None) -> dict[str, object]:
         if self.config.bitget_mode != "paper":
-            return {"status": "error", "code": "PAPER_MODE_REQUIRED", "labels": [VerificationLabel.UNVERIFIED.value]}
+            return self._annotate({"status": "error", "code": "PAPER_MODE_REQUIRED", "labels": [VerificationLabel.UNVERIFIED.value]}, "paper_order", {"symbol": symbol, "side": side, "notional": str(notional)})
         try:
             notional = Decimal(str(notional))
         except (InvalidOperation, TypeError, ValueError):
@@ -269,14 +350,14 @@ class BitgetAdapter:
             placement["status"] = "unverified" if placement.get("status") == "ok" else placement.get("status")
             placement["code"] = placement.get("code") or "PAPER_EXECUTION_NOT_VERIFIED"
             placement["labels"] = [VerificationLabel.UNVERIFIED.value]
-            return placement
+            return self._annotate(placement, "paper_order", {"symbol": symbol, "side": side, "notional": str(notional)})
         reference_pair = order_reference(placement.get("data"))
         reference_key, reference = reference_pair if reference_pair else (None, None)
         if not reference or not reference_key:
             placement["status"] = "unverified"
             placement["code"] = "PAPER_EXECUTION_NOT_VERIFIED"
             placement["labels"] = [VerificationLabel.UNVERIFIED.value]
-            return placement
+            return self._annotate(placement, "paper_order", {"symbol": symbol, "side": side, "notional": str(notional)})
         data = {"placement": placement.get("data"), "order_detail": None, "instrument": instrument}
         for attempt in range(MAX_ORDER_DETAIL_ATTEMPTS):
             detail = self.paper_order_detail(reference_key, reference)
@@ -287,10 +368,13 @@ class BitgetAdapter:
             status = str(order.get("orderStatus", "")).lower()
             if status == "filled":
                 if has_order_reference(order) and order.get(reference_key) == reference:
-                    return {"status": "ok", "data": data, "labels": [VerificationLabel.PAPER_EXECUTION.value]}
+                    return self._annotate({"status": "ok", "data": data, "labels": [VerificationLabel.PAPER_EXECUTION.value]}, "paper_order", {"symbol": symbol, "side": side, "notional": str(notional)})
                 break
             if status not in _PENDING_ORDER_STATUSES:
                 break
             if attempt + 1 < MAX_ORDER_DETAIL_ATTEMPTS:
                 time.sleep(ORDER_DETAIL_POLL_SECONDS)
-        return {"status": "unverified", "code": "PAPER_EXECUTION_NOT_VERIFIED", "data": data, "labels": [VerificationLabel.UNVERIFIED.value]}
+        return self._annotate({"status": "unverified", "code": "PAPER_EXECUTION_NOT_VERIFIED", "data": data, "labels": [VerificationLabel.UNVERIFIED.value]}, "paper_order", {"symbol": symbol, "side": side, "notional": str(notional)})
+
+    def verify_execution(self, value: dict[str, object]) -> bool:
+        return normalize_response(value, "paper_order").get("order_status") == "filled"
