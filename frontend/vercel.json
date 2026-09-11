@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "http://43.156.11.37:8088/api/:path*"
+      "destination": "https://api.flowvidence.my.id:8443/:path*"
     },
     {
       "source": "/(.*)",
