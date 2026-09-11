@@ -22,7 +22,7 @@ import qwen
 import prompts
 import target
 from config import Config, ConfigError, load_config
-from models import Action, AgentCreate, Category, Decision, Mode, OracleStatus, RunCreate, RunStatus, Scenario, ToolCall, ToolTrace, VerificationLabel
+from models import Action, AgentCapabilityState, AgentCreate, AgentStatus, Category, Decision, Mode, OracleStatus, RunCreate, RunStatus, Scenario, ToolCall, ToolTrace, VerificationLabel
 from providers import _FACTORIES, provider_for
 from oracle import consistency_oracle, evaluate, failure_type, tool_oracle
 from score import WEIGHTS, metrics, paper_verification, score
@@ -1295,7 +1295,7 @@ def test_agent_registry_requires_control_plane_and_hashes_one_time_key(monkeypat
     assert body["agent"]["execution_providers"] == ["binance"]
     assert onboarding.status_code == 200
     assert onboarding.json()["evaluation"]["synthetic"] == "READY"
-    assert onboarding.json()["evaluation"]["paper"] == "NOT_SUPPORTED"
+    assert onboarding.json()["evaluation"]["paper"] == "LOCKED"
     assert onboarding.json()["evaluation"]["execution_provider"] is None
     assert {item["name"] for item in onboarding.json()["methods"]} == {"AI Agent", "CLI", "TypeScript", "Python", "Raw Protocol"}
     connection = sqlite3.connect(config.db_path)
@@ -1329,6 +1329,97 @@ def test_agent_registry_auth_rotation_revocation_and_isolation(monkeypatch, tmp_
         assert client.get(f"/v1/agents/{first['agent']['agent_id']}", headers=first_headers).status_code == 401
         assert client.get(f"/v1/agents/{first['agent']['agent_id']}", headers=rotated_headers).status_code == 200
         assert client.get(f"/v1/agents/{first['agent']['agent_id']}").status_code == 401
+
+
+def test_paper_eligibility_gate_provider_declaration_and_capability_states(monkeypatch, tmp_path):
+    class FakePaperProvider:
+        provider_id = "fake"
+        paper_calls = 0
+
+        def __init__(self, config):
+            self.config = config
+
+        def capabilities(self):
+            return ["paper_order"]
+
+        def paper_order(self, *args, **kwargs):
+            type(self).paper_calls += 1
+            return {"status": "ok", "data": {}}
+
+    monkeypatch.setitem(_FACTORIES, "fake", FakePaperProvider)
+    config = replace(config_for(tmp_path), control_plane_token="control-secret", bitget_mode="paper", execution_provider="fake")
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    monkeypatch.setattr(api, "_schedule", lambda run_id: None)
+    db.init_db(config.db_path)
+    active_sessions = []
+
+    def connect(agent_id, connection_id):
+        session = api.gateway.registry.connect(agent_id, connection_id, config)
+        active_sessions.append(session)
+        db.set_agent_status(config.db_path, agent_id, AgentStatus.ONLINE)
+        return session
+
+    def paper_payload(agent_id, provider="fake"):
+        return {"agent_id": agent_id, "target_id": "GATEWAY", "mode": "PAPER", "execution_provider": provider, "max_episodes": 1, "difficulty": 1}
+
+    try:
+        with TestClient(api.app) as client:
+            registration = client.post("/v1/agents", json={"name": "Paper Trader", "version": "1", "declared_model": "model", "execution_providers": ["fake"]}, headers={"Authorization": "Bearer control-secret"}).json()
+            agent_id = registration["agent"]["agent_id"]
+            agent_headers = {"Authorization": f"Bearer {registration['api_key']}"}
+            registered_paper = client.post("/v1/evaluations", json=paper_payload(agent_id), headers=agent_headers)
+            assert registered_paper.status_code == 403
+            assert registered_paper.json()["detail"] == "PAPER_NOT_ELIGIBLE"
+            connect(agent_id, "paper-connection")
+            onboarding_locked = client.get(f"/v1/agents/{agent_id}/onboarding", headers=agent_headers)
+            assert onboarding_locked.json()["evaluation"]["paper"] == "LOCKED"
+            synthetic_ready = client.post("/v1/evaluations", json={"agent_id": agent_id, "target_id": "GATEWAY", "mode": "SYNTHETIC", "max_episodes": 1, "difficulty": 1}, headers=agent_headers)
+            assert synthetic_ready.status_code == 201
+            locked = client.post("/v1/evaluations", json=paper_payload(agent_id), headers=agent_headers)
+            assert locked.status_code == 403
+            assert locked.json()["detail"] == "PAPER_NOT_ELIGIBLE"
+            assert client.post(f"/v1/agents/{agent_id}/paper-eligibility", json={"eligible": True}, headers=agent_headers).status_code == 401
+            assert client.post(f"/v1/agents/{agent_id}/paper-eligibility", json={"eligible": True}).status_code == 401
+            granted = client.post(f"/v1/agents/{agent_id}/paper-eligibility", json={"eligible": True}, headers={"Authorization": "Bearer control-secret"})
+            assert granted.status_code == 200
+            assert granted.json()["capability_state"] == AgentCapabilityState.PAPER_ELIGIBLE.value
+            onboarding_ready = client.get(f"/v1/agents/{agent_id}/onboarding", headers=agent_headers)
+            assert onboarding_ready.json()["evaluation"]["paper"] == "READY"
+            paper_ready = client.post("/v1/evaluations", json=paper_payload(agent_id), headers=agent_headers)
+            assert paper_ready.status_code == 201
+            synthetic_eligible = client.post("/v1/evaluations", json={"agent_id": agent_id, "target_id": "GATEWAY", "mode": "SYNTHETIC", "max_episodes": 1, "difficulty": 1}, headers=agent_headers)
+            assert synthetic_eligible.status_code == 201
+            revoked = client.post(f"/v1/agents/{agent_id}/paper-eligibility", json={"eligible": False}, headers={"Authorization": "Bearer control-secret"})
+            assert revoked.status_code == 200
+            assert revoked.json()["capability_state"] == AgentCapabilityState.SYNTHETIC_READY.value
+            locked_again = client.post("/v1/evaluations", json=paper_payload(agent_id), headers=agent_headers)
+            assert locked_again.status_code == 403
+            granted_again = client.post(f"/v1/agents/{agent_id}/paper-eligibility", json={"eligible": True}, headers={"Authorization": "Bearer control-secret"})
+            assert granted_again.status_code == 200
+            api.gateway.registry.disconnect(active_sessions[-1])
+            db.set_agent_status(config.db_path, agent_id, AgentStatus.OFFLINE)
+            assert db.get_agent(config.db_path, agent_id).capability_state == AgentCapabilityState.PAPER_ELIGIBLE
+            connect(agent_id, "paper-reconnection")
+            assert db.get_agent(config.db_path, agent_id).capability_state == AgentCapabilityState.PAPER_ELIGIBLE
+            other = client.post("/v1/agents", json={"name": "Binance Trader", "version": "1", "declared_model": "model", "execution_providers": ["binance"]}, headers={"Authorization": "Bearer control-secret"}).json()
+            other_id = other["agent"]["agent_id"]
+            other_headers = {"Authorization": f"Bearer {other['api_key']}"}
+            connect(other_id, "binance-connection")
+            assert client.post(f"/v1/agents/{other_id}/paper-eligibility", json={"eligible": True}, headers={"Authorization": "Bearer control-secret"}).status_code == 200
+            unsupported_onboarding = client.get(f"/v1/agents/{other_id}/onboarding", headers=other_headers)
+            assert unsupported_onboarding.json()["evaluation"]["paper"] == "NOT_SUPPORTED"
+            undeclared = client.post("/v1/evaluations", json=paper_payload(other_id, "bitget"), headers=other_headers)
+            assert undeclared.status_code == 422
+            assert undeclared.json()["detail"] == "EXECUTION_PROVIDER_NOT_DECLARED"
+            unsupported = client.post("/v1/evaluations", json=paper_payload(other_id, "binance"), headers=other_headers)
+            assert unsupported.status_code == 422
+            assert unsupported.json()["detail"] == "EXECUTION_PROVIDER_UNAVAILABLE"
+    finally:
+        for session in active_sessions:
+            if not session.closed:
+                api.gateway.registry.disconnect(session)
+    assert FakePaperProvider.paper_calls == 0
 
 
 def test_provider_registry_supports_second_provider_without_engine_change(monkeypatch, tmp_path):

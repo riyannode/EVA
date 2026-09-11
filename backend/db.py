@@ -516,6 +516,20 @@ def set_agent_status(path: Path, agent_id: str, status: AgentStatus) -> Agent:
     return get_agent(path, agent_id)
 
 
+def set_agent_capability_state(path: Path, agent_id: str, owner_id: str, eligible: bool) -> Agent:
+    with _session(path) as connection:
+        row = connection.execute("SELECT capability_state, status, last_seen_at FROM agents WHERE agent_id = ? AND owner_id = ?", (agent_id, owner_id)).fetchone()
+        if row is None:
+            raise KeyError("AGENT_NOT_FOUND")
+        if eligible:
+            capability = AgentCapabilityState.PAPER_ELIGIBLE.value
+        else:
+            synthetic_ready = row["capability_state"] != AgentCapabilityState.REGISTERED.value or row["last_seen_at"] is not None or row["status"] != AgentStatus.OFFLINE.value
+            capability = AgentCapabilityState.SYNTHETIC_READY.value if synthetic_ready else AgentCapabilityState.REGISTERED.value
+        connection.execute("UPDATE agents SET capability_state = ? WHERE agent_id = ? AND owner_id = ?", (capability, agent_id, owner_id))
+    return get_agent(path, agent_id)
+
+
 def list_agent_runs(path: Path, agent_id: str, limit: int = 25) -> list[Run]:
     with _session(path) as connection:
         rows = connection.execute("SELECT * FROM runs WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?", (agent_id, limit)).fetchall()

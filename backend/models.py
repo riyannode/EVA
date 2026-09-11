@@ -358,6 +358,10 @@ class AgentCreate(StrictModel):
     provider_capabilities: dict[str, list[str]] = Field(default_factory=dict)
 
 
+class PaperEligibilityUpdate(StrictModel):
+    eligible: bool
+
+
 class Agent(StrictModel):
     agent_id: str
     owner_id: str

@@ -20,7 +20,7 @@ import graph
 import journal
 from limits import RateLimiter
 from config import Config, load_config
-from models import Agent, AgentCreate, AgentRegistration, AgentStatus, EvaluationMetrics, Mode, PairingRequest, PairingRequestCreate, Policy, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
+from models import Agent, AgentCapabilityState, AgentCreate, AgentRegistration, AgentStatus, EvaluationMetrics, Mode, PairingRequest, PairingRequestCreate, PaperEligibilityUpdate, Policy, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
 from provider import ProviderError
 from providers import instrument_ready, paper_order_contract_ready, provider_for, provider_result, structured_result
 from score import metrics, paper_verification, score
@@ -51,9 +51,11 @@ def _paper_provider(payload: RunCreate) -> RunCreate:
         return payload
     provider_id = payload.execution_provider or CONFIG.execution_provider
     try:
-        provider_for(CONFIG, provider_id)
+        adapter = provider_for(CONFIG, provider_id)
     except ProviderError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+        raise HTTPException(status_code=422, detail="EXECUTION_PROVIDER_UNAVAILABLE") from error
+    if "paper_order" not in _provider_capabilities(adapter) or (provider_id.lower() == "bitget" and CONFIG.bitget_mode != "paper"):
+        raise HTTPException(status_code=422, detail="EXECUTION_PROVIDER_UNAVAILABLE")
     return payload.model_copy(update={"execution_provider": provider_id})
 
 
@@ -61,12 +63,17 @@ def _onboarding_evaluation(agent: Agent) -> dict[str, object]:
     try:
         adapter = provider_for(CONFIG)
     except ProviderError:
-        return {"synthetic": "READY", "paper": "NOT_SUPPORTED", "execution_provider": None, "provider_capabilities": []}
+        paper = "LOCKED" if agent.capability_state != AgentCapabilityState.PAPER_ELIGIBLE else "NOT_SUPPORTED"
+        return {"synthetic": "READY", "paper": paper, "execution_provider": None, "provider_capabilities": []}
     capabilities = _provider_capabilities(adapter)
     provider_id = _provider_id(adapter)
     declared = {item.lower() for item in agent.execution_providers}
     supported = provider_id.lower() in declared
-    paper = "READY" if supported and CONFIG.bitget_mode == "paper" and "paper_order" in capabilities else "NOT_SUPPORTED"
+    runtime_ready = provider_id.lower() != "bitget" or CONFIG.bitget_mode == "paper"
+    if agent.capability_state != AgentCapabilityState.PAPER_ELIGIBLE:
+        paper = "LOCKED"
+    else:
+        paper = "READY" if supported and runtime_ready and "paper_order" in capabilities else "NOT_SUPPORTED"
     return {"synthetic": "READY", "paper": paper, "execution_provider": provider_id if supported else None, "provider_capabilities": capabilities}
 
 
@@ -219,6 +226,16 @@ def register_agent(request: Request, payload: AgentCreate) -> AgentRegistration:
 def read_agent(request: Request, agent_id: str) -> Agent:
     _limit(request, "agent-read", 120, 60)
     return auth.require_agent_access(request, CONFIG, DB_PATH, agent_id)
+
+
+@app.post("/v1/agents/{agent_id}/paper-eligibility", response_model=Agent)
+def update_paper_eligibility(request: Request, agent_id: str, payload: PaperEligibilityUpdate) -> Agent:
+    _limit(request, "paper-eligibility", 30, 60)
+    owner_id = auth.require_control_plane(request, CONFIG)
+    try:
+        return db.set_agent_capability_state(DB_PATH, agent_id, owner_id, payload.eligible)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="AGENT_NOT_FOUND") from error
 
 
 @app.get("/v1/agents/{agent_id}/onboarding")
@@ -377,6 +394,8 @@ async def create_evaluation(request: Request, payload: RunCreate) -> Run:
     if not payload.agent_id:
         raise HTTPException(status_code=422, detail="AGENT_ID_REQUIRED")
     agent = auth.require_agent_access(request, CONFIG, DB_PATH, payload.agent_id)
+    if payload.mode in {Mode.PAPER, Mode.BITGET_PAPER} and agent.capability_state != AgentCapabilityState.PAPER_ELIGIBLE:
+        raise HTTPException(status_code=403, detail="PAPER_NOT_ELIGIBLE")
     session = gateway.registry.get(payload.agent_id)
     if not session:
         raise HTTPException(status_code=409, detail="AGENT_OFFLINE")
@@ -384,6 +403,11 @@ async def create_evaluation(request: Request, payload: RunCreate) -> Run:
         raise HTTPException(status_code=409, detail="EVALUATION_ALREADY_ACTIVE")
     if payload.target_id != "GATEWAY":
         raise HTTPException(status_code=422, detail="GATEWAY_TARGET_REQUIRED")
+    if payload.mode in {Mode.PAPER, Mode.BITGET_PAPER}:
+        provider_id = (payload.execution_provider or CONFIG.execution_provider).lower()
+        declared = {item.lower() for item in agent.execution_providers}
+        if provider_id not in declared:
+            raise HTTPException(status_code=422, detail="EXECUTION_PROVIDER_NOT_DECLARED")
     payload = payload.model_copy(update={"target_name": agent.name, "target_version": agent.version, "target_model": agent.declared_model})
     payload = _paper_provider(payload)
     run = db.create_run(DB_PATH, payload)

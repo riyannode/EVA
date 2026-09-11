@@ -54,7 +54,9 @@ Generated setup prompts contain the pairing request ID and next steps, never an 
 
 Connection promotes a registered agent to `ONLINE` and `SYNTHETIC_READY`. Synthetic evaluation is available for compatible connected agents regardless of declared exchange. An exchange-agnostic agent can register, connect, and run synthetic evaluation.
 
-Paper evaluation is available only when EVA has a configured compatible execution provider. Declaring Binance, Bybit, Coinbase, another venue, or no venue does not create provider support. The onboarding status reports `NOT_SUPPORTED` when the selected execution venue has no configured adapter.
+External agents become `SYNTHETIC_READY` after a valid Gateway connection. PAPER evaluation remains `LOCKED` until EVA explicitly grants `PAPER_ELIGIBLE`. Provider declaration is metadata and does not grant PAPER authorization. After eligibility is granted, the selected execution provider must still be declared by the agent, registered and capable in EVA, and available at runtime. The onboarding status reports `NOT_SUPPORTED` when the selected venue has no configured adapter or PAPER capability. Declaring Binance, Bybit, Coinbase, another venue, or no venue does not create provider support.
+
+An operator grants or revokes PAPER eligibility with the control-plane-only endpoint `POST /v1/agents/{agent_id}/paper-eligibility` and `{ "eligible": true }` or `{ "eligible": false }`. Gateway connection, provider declaration, successful synthetic evaluation, CLI usage, and frontend state cannot self-promote an agent to `PAPER_ELIGIBLE`.
 
 Onboarding itself sends no `paper_order` and creates no exchange-side write. A completed synthetic run returns score, evidence, weaknesses, and a signed certificate only when certificate signing is configured.
 

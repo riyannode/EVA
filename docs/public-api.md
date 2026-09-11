@@ -21,6 +21,7 @@ Before approval, the request has no agent privilege. A second exchange is reject
 
 - `POST /v1/agents` registers an agent directly for operator-controlled administration and returns a one-time API key.
 - `GET /v1/agents/{agent_id}` reads authenticated agent state.
+- `POST /v1/agents/{agent_id}/paper-eligibility` grants or revokes `PAPER_ELIGIBLE` with the control-plane credential.
 - `GET /v1/agents/{agent_id}/onboarding` returns connection instructions without returning a key.
 - `POST /v1/agents/{agent_id}/keys` rotates a key and returns the replacement once.
 - `DELETE /v1/agents/{agent_id}/keys/{key_id}` revokes a key.
@@ -35,7 +36,7 @@ Before approval, the request has no agent privilege. A second exchange is reject
 - `GET /v1/agents/{agent_id}/evaluations` reads history.
 - `GET /v1/agents/{agent_id}/weaknesses` reads target-scoped weakness memory.
 
-Gateway evaluations use `target_id: "GATEWAY"` and can use `SYNTHETIC` or generic `PAPER`. `BITGET_PAPER` remains accepted for historical compatibility. Paper creation validates that the selected provider is registered; only configured capabilities can execute.
+Gateway evaluations use `target_id: "GATEWAY"` and can use `SYNTHETIC` or generic `PAPER`. `BITGET_PAPER` remains accepted for historical compatibility. A connected agent is `SYNTHETIC_READY` only; PAPER creation requires `PAPER_ELIGIBLE`, an active Gateway session, a declared provider, and a registered provider with runtime PAPER capability. Requests fail before scheduling when these conditions are not met. Provider declaration is not execution authorization. Capability failure returns `403 PAPER_NOT_ELIGIBLE`; an undeclared provider returns `422 EXECUTION_PROVIDER_NOT_DECLARED`; an unavailable provider returns `422 EXECUTION_PROVIDER_UNAVAILABLE`.
 
 ## Certificates and sharing
 
