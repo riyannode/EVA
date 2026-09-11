@@ -7,6 +7,7 @@ import Analysis from "./analysis";
 import Agents, { type AgentSummary } from "./agents";
 import { displayLabel, runLabel } from "./presentation";
 import Select from "./select";
+import ScrollArea from "./scroll-area";
 
 const Office = lazy(() => import("./office"));
 const NightBackground = lazy(() => import("./night-background"));
@@ -221,7 +222,7 @@ export default function App() {
           {isActive(run) && <button className="button stop-button" disabled={busy} onClick={() => void stop()}>Stop run</button>}
         </div>
         <div id="evidence-panel" role="tabpanel" aria-labelledby={`tab-${tab.replaceAll(" ", "-")}`}>
-          {tab === "Activity" && <><div className="feed-heading"><span>Graph event stream</span><span>{run ? stream === "connected" ? "SSE connected" : stream === "closed" ? "Stored run events" : "Stream reconnecting" : "Waiting for a run"}</span></div>{events.length ? <ol className="event-list">{[...events].reverse().map(event => <li key={event.id}><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString("en-GB")}</time><span className="event-type">{event.type}</span><details><summary>Inspect payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol> : <Empty title="A quiet office, for now.">Start an evaluation to see scenarios, decisions and oracle results arrive here.</Empty>}</>}
+          {tab === "Activity" && <><div className="feed-heading"><span>Graph event stream</span><span>{run ? stream === "connected" ? "SSE connected" : stream === "closed" ? "Stored run events" : "Stream reconnecting" : "Waiting for a run"}</span></div>{events.length ? <ScrollArea className="event-scroll"><ol className="event-list">{[...events].reverse().map(event => <li key={event.id}><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString("en-GB")}</time><span className="event-type">{event.type}</span><details><summary>Inspect payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol></ScrollArea> : <Empty title="A quiet office, for now.">Start an evaluation to see scenarios, decisions and oracle results arrive here.</Empty>}</>}
         </div>
       </section>
       <section className="telemetry" aria-label="Run summary">
