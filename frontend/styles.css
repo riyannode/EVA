@@ -618,7 +618,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; font-size: 10
 .learning-summary strong { font: 18px var(--pixel); overflow-wrap: anywhere; }
 .learning-summary span { color: var(--muted); }
 .mutation-retests,.paper-report { padding: 24px; }
-.mutation-retests button { display: flex; justify-content: space-between; gap: 20px; width: 100%; padding: 15px 0; text-align: left; border-bottom: 1px solid var(--line); }
+.mutation-retests button { display: flex; justify-content: space-between; gap: 20px; width: 100%; padding: 15px 0; text-align: left; border-bottom: 0; }
 @media(max-width:900px) { .report-columns { grid-template-columns: 1fr; gap: 0; } .test-workspace { grid-template-columns: 210px minmax(0,1fr); } .test-detail { padding: 24px; } }
 @media(max-width:600px) {
   .agents-card { padding: 20px; }
@@ -687,7 +687,7 @@ body:has(.night-background) :is(.agents-card input, .agents-card select, .agents
 .run-select select:focus-visible { outline: 2px solid transparent; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(198, 229, 182, .14); }
 :is(.agents-card, .run-dialog) :is(input, select, textarea)::placeholder { color: #9aaca0; opacity: 1; }
 
-.agents-card { max-width: 860px; padding: 0; overflow: hidden; }
+.agents-card { width: 70%; max-width: none; margin-right: auto; padding: 0; overflow: hidden; }
 .agents-card > h2 { margin: 0; padding: 18px 24px 16px; border-bottom: 1px solid var(--line-soft); color: var(--text-strong); font: 12px var(--pixel); }
 .agents-card > form { padding: 22px 24px 24px; }
 .agents-card > form .form-note { margin-bottom: 18px; }
@@ -745,7 +745,7 @@ th:nth-child(n + 3), td:nth-child(n + 3) { text-align: right; }
 .report-next button { border-radius: 6px; }
 
 @media (max-width: 600px) {
-  .agents-card { max-width: none; }
+  .agents-card { width: 100%; }
   .agents-card > h2 { padding-inline: 20px; }
   .agents-card > form { padding-inline: 20px; }
   .agents-card > .agent-status-card { margin-inline: 20px; }
