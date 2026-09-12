@@ -157,6 +157,24 @@ export type Verification = {
   target_identity?: Record<string, string | null>;
 };
 
+export type AgentStatus = "OFFLINE" | "CONNECTING" | "ONLINE" | "EVALUATING" | "DEGRADED" | "DISABLED";
+export type AgentCapabilityState = "REGISTERED" | "SYNTHETIC_READY" | "PAPER_ELIGIBLE";
+
+export type AgentCatalogEntry = {
+  agent_id: string;
+  name: string;
+  version: string;
+  declared_model: string;
+  framework: string | null;
+  status: AgentStatus;
+  capability_state: AgentCapabilityState;
+  protocol_version: string;
+  capabilities: string[];
+  execution_providers: string[];
+  evaluation_count: number;
+  latest_readiness: string | null;
+};
+
 export type Agent = {
   agent_id: string;
   owner_id: string;
@@ -166,8 +184,8 @@ export type Agent = {
   framework: string | null;
   created_at: string;
   last_seen_at: string | null;
-  status: "OFFLINE" | "CONNECTING" | "ONLINE" | "EVALUATING" | "DEGRADED" | "DISABLED";
-  capability_state: "REGISTERED" | "SYNTHETIC_READY" | "PAPER_ELIGIBLE";
+  status: AgentStatus;
+  capability_state: AgentCapabilityState;
   protocol_version: string;
   capabilities: string[];
   execution_providers: string[];
@@ -201,6 +219,7 @@ export const getWeaknesses = (id: string) => request<Weakness[]>(`/runs/${encode
 export const getVerification = (id: string) => request<Verification>(`/runs/${encodeURIComponent(id)}/verification`);
 export const stopRun = (id: string) => request<Run>(`/runs/${encodeURIComponent(id)}/stop`, { method: "POST" });
 export const eventUrl = (id: string) => `${base}/runs/${encodeURIComponent(id)}/events`;
+export const getAgentCatalog = () => request<AgentCatalogEntry[]>("/v1/catalog/agents");
 export const createPairingRequest = (input: { name: string; version: string; declared_model: string; framework?: string; execution_providers?: string[] }) => request<PairingRequest>("/v1/pairing-requests", { method: "POST", body: JSON.stringify(input) });
 export const getPairingRequest = (id: string) => request<PairingRequest>(`/v1/pairing-requests/${encodeURIComponent(id)}`);
 export const completePairing = (id: string) => request<AgentRegistration>(`/v1/pairing-requests/${encodeURIComponent(id)}/exchange`, { method: "POST" });

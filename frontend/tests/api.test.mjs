@@ -65,3 +65,36 @@ test("pairing API uses public request and one-time exchange routes", async () =>
     assert.equal(calls[2].init.method, "POST");
   } finally { globalThis.fetch = original; }
 });
+
+test("public agent catalog parses safe fields without an agent credential", async () => {
+  const original = globalThis.fetch;
+  const entry = {
+    agent_id: "agt_public",
+    name: "darwin-bitget",
+    version: "0.2.0",
+    declared_model: "qwen3.8-max",
+    framework: "cloudflare-workers-durable-objects",
+    status: "OFFLINE",
+    capability_state: "SYNTHETIC_READY",
+    protocol_version: "eva-agent/1",
+    capabilities: ["market", "account", "history", "escalate"],
+    execution_providers: ["bitget"],
+    evaluation_count: 0,
+    latest_readiness: null,
+  };
+  globalThis.fetch = async (url, init) => {
+    assert.equal(new URL(url).pathname, "/v1/catalog/agents");
+    assert.equal(init.method, undefined);
+    assert.equal(init.headers.Authorization, undefined);
+    return new Response(JSON.stringify([entry]), { status: 200 });
+  };
+  try { assert.deepEqual(await api.getAgentCatalog(), [entry]); }
+  finally { globalThis.fetch = original; }
+});
+
+test("public catalog type excludes private agent identity and credential fields", async () => {
+  const source = await (await import("node:fs/promises")).readFile(new URL("../api.ts", import.meta.url), "utf8");
+  const publicType = source.match(/export type AgentCatalogEntry = \{[\s\S]*?\n\};/)?.[0] ?? "";
+  assert.match(publicType, /agent_id/);
+  assert.doesNotMatch(publicType, /owner_id|api_key|key_id|key_hash|key_salt|credentials|latest_evaluation_id/);
+});
