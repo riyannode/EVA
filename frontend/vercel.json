@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://api.flowvidence.my.id:8443/:path*"
+      "destination": "https://eva-api.tailcfdbc9.ts.net/:path*"
     },
     {
       "source": "/(.*)",
