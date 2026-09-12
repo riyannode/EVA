@@ -1331,6 +1331,135 @@ def test_agent_registry_auth_rotation_revocation_and_isolation(monkeypatch, tmp_
         assert client.get(f"/v1/agents/{first['agent']['agent_id']}").status_code == 401
 
 
+def test_agent_catalog_visibility_is_private_and_controlled(monkeypatch, tmp_path):
+    config = replace(config_for(tmp_path), control_plane_token="control-secret")
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    monkeypatch.setattr(api, "LIMITER", type(api.LIMITER)())
+    db.init_db(config.db_path)
+    payload = {
+        "name": "darwin-bitget",
+        "version": "0.2.0",
+        "declared_model": "qwen3.8-max",
+        "framework": "cloudflare-workers-durable-objects",
+        "capabilities": ["market", "account", "history", "escalate"],
+        "execution_providers": ["bitget"],
+    }
+    with TestClient(api.app) as client:
+        registration = client.post("/v1/agents", json=payload, headers={"Authorization": "Bearer control-secret"}).json()
+        agent_id = registration["agent"]["agent_id"]
+        agent_headers = {"Authorization": f"Bearer {registration['api_key']}"}
+        db.set_agent_status(config.db_path, agent_id, AgentStatus.ONLINE)
+        db.set_agent_status(config.db_path, agent_id, AgentStatus.OFFLINE)
+        assert db.get_agent(config.db_path, agent_id).catalog_visible is False
+        assert client.get("/v1/catalog/agents").json() == []
+        assert client.patch(f"/v1/agents/{agent_id}/catalog-visibility", json={"visible": True}).status_code == 401
+        assert client.patch(f"/v1/agents/{agent_id}/catalog-visibility", json={"visible": True}, headers=agent_headers).status_code == 401
+        published = client.patch(f"/v1/agents/{agent_id}/catalog-visibility", json={"visible": True}, headers={"Authorization": "Bearer control-secret"})
+        assert published.status_code == 200
+        assert published.json() == {"agent_id": agent_id, "name": "darwin-bitget", "catalog_visible": True}
+        listing = client.get("/v1/catalog/agents")
+        detail = client.get(f"/v1/catalog/agents/{agent_id}")
+        assert listing.status_code == 200
+        assert detail.status_code == 200
+        assert listing.json() == [detail.json()]
+        item = listing.json()[0]
+        assert item == {
+            "agent_id": agent_id,
+            "name": "darwin-bitget",
+            "version": "0.2.0",
+            "declared_model": "qwen3.8-max",
+            "framework": "cloudflare-workers-durable-objects",
+            "status": "OFFLINE",
+            "capability_state": "SYNTHETIC_READY",
+            "protocol_version": "eva-agent/1",
+            "capabilities": ["market", "account", "history", "escalate"],
+            "execution_providers": ["bitget"],
+            "evaluation_count": 0,
+            "latest_readiness": None,
+        }
+        assert not {"owner_id", "api_key", "key_id", "key_hash", "key_salt", "credentials", "provider_credentials"} & item.keys()
+        unpublished = client.patch(f"/v1/agents/{agent_id}/catalog-visibility", json={"visible": False}, headers={"Authorization": "Bearer control-secret"})
+        assert unpublished.status_code == 200
+        assert unpublished.json() == {"agent_id": agent_id, "name": "darwin-bitget", "catalog_visible": False}
+        assert client.get("/v1/catalog/agents").json() == []
+        assert client.get(f"/v1/catalog/agents/{agent_id}").status_code == 404
+
+
+def test_agent_catalog_visibility_defaults_false_for_pairing(monkeypatch, tmp_path):
+    config = replace(config_for(tmp_path), control_plane_token="control-secret")
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    db.init_db(config.db_path)
+    payload = {"name": "Paired Trader", "version": "1.0.0", "declared_model": "model-v1"}
+    with TestClient(api.app) as client:
+        created = client.post("/v1/pairing-requests", json=payload)
+        request_id = created.json()["request_id"]
+        assert created.status_code == 201
+        approved = client.post(f"/v1/pairing-requests/{request_id}/approve", headers={"Authorization": "Bearer control-secret"})
+        registration = client.post(f"/v1/pairing-requests/{request_id}/exchange")
+    assert approved.status_code == 200
+    assert registration.status_code == 200
+    agent_id = registration.json()["agent"]["agent_id"]
+    assert db.get_agent(config.db_path, agent_id).catalog_visible is False
+    assert db.list_catalog_agents(config.db_path) == []
+
+
+def test_agent_catalog_endpoints_are_rate_limited(monkeypatch, tmp_path):
+    config = config_for(tmp_path)
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    limiter = type(api.LIMITER)()
+    monkeypatch.setattr(api, "LIMITER", limiter)
+    monkeypatch.setattr(limiter, "allow", lambda key, limit, window: False)
+    with TestClient(api.app) as client:
+        assert client.get("/v1/catalog/agents").status_code == 429
+        assert client.get("/v1/catalog/agents/agt_missing").status_code == 429
+
+
+def test_agent_catalog_migration_preserves_existing_agent(tmp_path):
+    path = tmp_path / "eva.db"
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE agents (
+                agent_id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                declared_model TEXT NOT NULL,
+                framework TEXT,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT,
+                status TEXT NOT NULL,
+                capability_state TEXT NOT NULL,
+                protocol_version TEXT NOT NULL,
+                capabilities_json TEXT NOT NULL,
+                execution_providers_json TEXT NOT NULL,
+                provider_capabilities_json TEXT NOT NULL,
+                evaluation_count INTEGER NOT NULL DEFAULT 0,
+                latest_readiness TEXT,
+                latest_evaluation_id TEXT
+            );
+            INSERT INTO agents VALUES ('agt_existing', 'owner', 'Existing', '1.0.0', 'model', NULL, '2026-09-12T00:00:00+00:00', NULL, 'OFFLINE', 'REGISTERED', 'eva-agent/1', '[]', '[]', '{}', 0, NULL, NULL);
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    db.init_db(path)
+    agent = db.get_agent(path, "agt_existing")
+    assert agent.name == "Existing"
+    assert agent.catalog_visible is False
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("SELECT count(*) FROM agents").fetchone()[0] == 1
+        assert connection.execute("SELECT catalog_visible FROM agents WHERE agent_id = 'agt_existing'").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
 def test_paper_eligibility_gate_provider_declaration_and_capability_states(monkeypatch, tmp_path):
     class FakePaperProvider:
         provider_id = "fake"
