@@ -380,6 +380,33 @@ class Agent(StrictModel):
     evaluation_count: int = Field(default=0, ge=0)
     latest_readiness: str | None = None
     latest_evaluation_id: str | None = None
+    catalog_visible: bool = False
+
+
+class AgentCatalogEntry(StrictModel):
+    agent_id: str
+    name: str
+    version: str
+    declared_model: str
+    framework: str | None = None
+    status: AgentStatus
+    capability_state: AgentCapabilityState
+    protocol_version: str
+    capabilities: list[str] = Field(default_factory=list)
+    execution_providers: list[str] = Field(default_factory=list)
+    evaluation_count: int = Field(default=0, ge=0)
+    latest_readiness: str | None = None
+    latest_evaluation_id: str | None = None
+
+
+class CatalogVisibilityUpdate(StrictModel):
+    visible: bool
+
+
+class CatalogVisibilityResponse(StrictModel):
+    agent_id: str
+    name: str
+    catalog_visible: bool
 
 
 class AgentKey(StrictModel):

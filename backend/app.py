@@ -20,7 +20,7 @@ import graph
 import journal
 from limits import RateLimiter
 from config import Config, load_config
-from models import Agent, AgentCapabilityState, AgentCreate, AgentRegistration, AgentStatus, EvaluationMetrics, Mode, PairingRequest, PairingRequestCreate, PaperEligibilityUpdate, Policy, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
+from models import Agent, AgentCapabilityState, AgentCatalogEntry, AgentCreate, AgentRegistration, AgentStatus, CatalogVisibilityResponse, CatalogVisibilityUpdate, EvaluationMetrics, Mode, PairingRequest, PairingRequestCreate, PaperEligibilityUpdate, Policy, Run, RunCreate, RunStatus, Scorecard, VerificationSummary
 from provider import ProviderError
 from providers import instrument_ready, paper_order_contract_ready, provider_for, provider_result, structured_result
 from score import metrics, paper_verification, score
@@ -30,7 +30,7 @@ CONFIG: Config = load_config()
 DB_PATH: Path = CONFIG.db_path
 db.init_db(DB_PATH)
 app = FastAPI(title="EVA", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=[CONFIG.frontend_origin], allow_credentials=False, allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=[CONFIG.frontend_origin], allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["*"])
 TASKS: dict[str, asyncio.Task[None]] = {}
 REQUESTS: dict[str, RunCreate] = {}
 LIMITER = RateLimiter()
@@ -99,6 +99,24 @@ def _pairing(request_id: str) -> PairingRequest:
         return db.get_pairing(DB_PATH, request_id, _pairing_url(request_id))
     except KeyError as error:
         raise HTTPException(status_code=404, detail="PAIRING_NOT_FOUND") from error
+
+
+def _catalog_entry(agent: Agent) -> AgentCatalogEntry:
+    return AgentCatalogEntry(
+        agent_id=agent.agent_id,
+        name=agent.name,
+        version=agent.version,
+        declared_model=agent.declared_model,
+        framework=agent.framework,
+        status=agent.status,
+        capability_state=agent.capability_state,
+        protocol_version=agent.protocol_version,
+        capabilities=agent.capabilities,
+        execution_providers=agent.execution_providers,
+        evaluation_count=agent.evaluation_count,
+        latest_readiness=agent.latest_readiness,
+        latest_evaluation_id=agent.latest_evaluation_id,
+    )
 
 
 def _share_hash(token: str) -> str:
@@ -222,10 +240,35 @@ def register_agent(request: Request, payload: AgentCreate) -> AgentRegistration:
     return AgentRegistration(agent=agent, key=key, api_key=api_key)
 
 
+@app.patch("/v1/agents/{agent_id}/catalog-visibility", response_model=CatalogVisibilityResponse)
+def update_catalog_visibility(request: Request, agent_id: str, payload: CatalogVisibilityUpdate) -> CatalogVisibilityResponse:
+    _limit(request, "catalog-visibility", 30, 60)
+    auth.require_control_plane(request, CONFIG)
+    try:
+        agent = db.set_catalog_visibility(DB_PATH, agent_id, payload.visible)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="AGENT_NOT_FOUND") from error
+    return CatalogVisibilityResponse(agent_id=agent.agent_id, name=agent.name, catalog_visible=agent.catalog_visible)
+
+
 @app.get("/v1/agents/{agent_id}", response_model=Agent)
 def read_agent(request: Request, agent_id: str) -> Agent:
     _limit(request, "agent-read", 120, 60)
     return auth.require_agent_access(request, CONFIG, DB_PATH, agent_id)
+
+
+@app.get("/v1/catalog/agents", response_model=list[AgentCatalogEntry])
+def list_catalog() -> list[AgentCatalogEntry]:
+    return [_catalog_entry(agent) for agent in db.list_catalog_agents(DB_PATH)]
+
+
+@app.get("/v1/catalog/agents/{agent_id}", response_model=AgentCatalogEntry)
+def catalog_detail(agent_id: str) -> AgentCatalogEntry:
+    try:
+        agent = db.get_catalog_agent(DB_PATH, agent_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="AGENT_NOT_FOUND") from error
+    return _catalog_entry(agent)
 
 
 @app.post("/v1/agents/{agent_id}/paper-eligibility", response_model=Agent)

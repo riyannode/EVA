@@ -152,6 +152,7 @@ def init_db(path: Path) -> None:
                 capabilities_json TEXT NOT NULL,
                 execution_providers_json TEXT NOT NULL,
                 provider_capabilities_json TEXT NOT NULL,
+                catalog_visible INTEGER NOT NULL DEFAULT 0,
                 evaluation_count INTEGER NOT NULL DEFAULT 0,
                 latest_readiness TEXT,
                 latest_evaluation_id TEXT
@@ -208,6 +209,9 @@ def init_db(path: Path) -> None:
             connection.execute("ALTER TABLE runs ADD COLUMN target_url TEXT")
         if "evidence_root" not in columns:
             connection.execute("ALTER TABLE runs ADD COLUMN evidence_root TEXT")
+        agent_columns = {row["name"] for row in connection.execute("PRAGMA table_info(agents)").fetchall()}
+        if "catalog_visible" not in agent_columns:
+            connection.execute("ALTER TABLE agents ADD COLUMN catalog_visible INTEGER NOT NULL DEFAULT 0")
         event_columns = {row["name"] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
         if "sequence" not in event_columns:
             connection.execute("ALTER TABLE events ADD COLUMN sequence INTEGER")
@@ -430,8 +434,8 @@ def create_agent(path: Path, request: AgentCreate, owner_id: str, agent_id: str,
     created = now()
     with _session(path) as connection:
         connection.execute(
-            "INSERT INTO agents (agent_id, owner_id, name, version, declared_model, framework, created_at, status, capability_state, protocol_version, capabilities_json, execution_providers_json, provider_capabilities_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (agent_id, owner_id, request.name, request.version, request.declared_model, request.framework, created.isoformat(), AgentStatus.OFFLINE.value, AgentCapabilityState.REGISTERED.value, request.protocol_version, _text(request.capabilities), _text(request.execution_providers), _text(request.provider_capabilities)),
+            "INSERT INTO agents (agent_id, owner_id, name, version, declared_model, framework, created_at, status, capability_state, protocol_version, capabilities_json, execution_providers_json, provider_capabilities_json, catalog_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, owner_id, request.name, request.version, request.declared_model, request.framework, created.isoformat(), AgentStatus.OFFLINE.value, AgentCapabilityState.REGISTERED.value, request.protocol_version, _text(request.capabilities), _text(request.execution_providers), _text(request.provider_capabilities), 0),
         )
         connection.execute(
             "INSERT INTO agent_keys (key_id, agent_id, key_hash, key_salt, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -459,6 +463,7 @@ def _agent(row: sqlite3.Row) -> Agent:
         evaluation_count=row["evaluation_count"],
         latest_readiness=row["latest_readiness"],
         latest_evaluation_id=row["latest_evaluation_id"],
+        catalog_visible=bool(row["catalog_visible"]),
     )
 
 
@@ -468,6 +473,28 @@ def get_agent(path: Path, agent_id: str) -> Agent:
     if row is None:
         raise KeyError("AGENT_NOT_FOUND")
     return _agent(row)
+
+
+def list_catalog_agents(path: Path) -> list[Agent]:
+    with _session(path) as connection:
+        rows = connection.execute("SELECT * FROM agents WHERE catalog_visible = 1 ORDER BY created_at DESC, agent_id ASC").fetchall()
+    return [_agent(row) for row in rows]
+
+
+def get_catalog_agent(path: Path, agent_id: str) -> Agent:
+    with _session(path) as connection:
+        row = connection.execute("SELECT * FROM agents WHERE agent_id = ? AND catalog_visible = 1", (agent_id,)).fetchone()
+    if row is None:
+        raise KeyError("AGENT_NOT_FOUND")
+    return _agent(row)
+
+
+def set_catalog_visibility(path: Path, agent_id: str, visible: bool) -> Agent:
+    with _session(path) as connection:
+        cursor = connection.execute("UPDATE agents SET catalog_visible = ? WHERE agent_id = ?", (int(visible), agent_id))
+        if cursor.rowcount == 0:
+            raise KeyError("AGENT_NOT_FOUND")
+    return get_agent(path, agent_id)
 
 
 def get_agent_key(path: Path, agent_id: str, key_id: str) -> AgentKey:
