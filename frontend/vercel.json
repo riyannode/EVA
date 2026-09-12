@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://eva-api.tailcfdbc9.ts.net/:path*"
+      "destination": "https://api.evalabs.my.id/:path*"
     },
     {
       "source": "/(.*)",
