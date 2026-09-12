@@ -1377,7 +1377,6 @@ def test_agent_catalog_visibility_is_private_and_controlled(monkeypatch, tmp_pat
             "execution_providers": ["bitget"],
             "evaluation_count": 0,
             "latest_readiness": None,
-            "latest_evaluation_id": None,
         }
         assert not {"owner_id", "api_key", "key_id", "key_hash", "key_salt", "credentials", "provider_credentials"} & item.keys()
         unpublished = client.patch(f"/v1/agents/{agent_id}/catalog-visibility", json={"visible": False}, headers={"Authorization": "Bearer control-secret"})
@@ -1404,6 +1403,18 @@ def test_agent_catalog_visibility_defaults_false_for_pairing(monkeypatch, tmp_pa
     agent_id = registration.json()["agent"]["agent_id"]
     assert db.get_agent(config.db_path, agent_id).catalog_visible is False
     assert db.list_catalog_agents(config.db_path) == []
+
+
+def test_agent_catalog_endpoints_are_rate_limited(monkeypatch, tmp_path):
+    config = config_for(tmp_path)
+    monkeypatch.setattr(api, "CONFIG", config)
+    monkeypatch.setattr(api, "DB_PATH", config.db_path)
+    limiter = type(api.LIMITER)()
+    monkeypatch.setattr(api, "LIMITER", limiter)
+    monkeypatch.setattr(limiter, "allow", lambda key, limit, window: False)
+    with TestClient(api.app) as client:
+        assert client.get("/v1/catalog/agents").status_code == 429
+        assert client.get("/v1/catalog/agents/agt_missing").status_code == 429
 
 
 def test_agent_catalog_migration_preserves_existing_agent(tmp_path):

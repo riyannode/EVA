@@ -115,7 +115,6 @@ def _catalog_entry(agent: Agent) -> AgentCatalogEntry:
         execution_providers=agent.execution_providers,
         evaluation_count=agent.evaluation_count,
         latest_readiness=agent.latest_readiness,
-        latest_evaluation_id=agent.latest_evaluation_id,
     )
 
 
@@ -258,12 +257,14 @@ def read_agent(request: Request, agent_id: str) -> Agent:
 
 
 @app.get("/v1/catalog/agents", response_model=list[AgentCatalogEntry])
-def list_catalog() -> list[AgentCatalogEntry]:
+def list_catalog(request: Request) -> list[AgentCatalogEntry]:
+    _limit(request, "catalog-list", 120, 60)
     return [_catalog_entry(agent) for agent in db.list_catalog_agents(DB_PATH)]
 
 
 @app.get("/v1/catalog/agents/{agent_id}", response_model=AgentCatalogEntry)
-def catalog_detail(agent_id: str) -> AgentCatalogEntry:
+def catalog_detail(request: Request, agent_id: str) -> AgentCatalogEntry:
+    _limit(request, "catalog-detail", 120, 60)
     try:
         agent = db.get_catalog_agent(DB_PATH, agent_id)
     except KeyError as error:

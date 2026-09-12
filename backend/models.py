@@ -396,7 +396,6 @@ class AgentCatalogEntry(StrictModel):
     execution_providers: list[str] = Field(default_factory=list)
     evaluation_count: int = Field(default=0, ge=0)
     latest_readiness: str | None = None
-    latest_evaluation_id: str | None = None
 
 
 class CatalogVisibilityUpdate(StrictModel):
