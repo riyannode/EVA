@@ -91,16 +91,24 @@ export default function App() {
   }, [retry]);
 
   useEffect(() => {
+    if (view !== "observatory") return;
     let disposed = false;
-    getAgentCatalog().then(entries => {
-      if (disposed) return;
-      setCatalog(entries);
-      setCatalogState(entries.length ? "loaded" : "empty");
-    }).catch(() => {
-      if (!disposed) setCatalogState("error");
-    });
-    return () => { disposed = true; };
-  }, []);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      try {
+        const entries = await getAgentCatalog();
+        if (disposed) return;
+        setCatalog(entries);
+        setCatalogState(entries.length ? "loaded" : "empty");
+      } catch {
+        if (!disposed) setCatalogState("error");
+      } finally {
+        if (!disposed) timer = setTimeout(load, 5000);
+      }
+    };
+    void load();
+    return () => { disposed = true; if (timer) clearTimeout(timer); };
+  }, [view]);
 
   useEffect(() => {
     setRun(null); setEpisodes([]); setScore(null); setMetrics(null); setWeaknesses([]); setVerification(null); setEvents([]); setStage(null);
