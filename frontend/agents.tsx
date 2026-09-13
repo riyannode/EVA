@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { completePairing, createEvaluation, createPairingRequest, getAgent, getAgentCatalog, getOnboarding, getPairingRequest, type Agent, type AgentCatalogEntry, type AgentRegistration, type Onboarding, type PairingRequest, type Run } from "./api";
 
-export type AgentSummary = { agent: Agent; onboarding: Onboarding | null };
-type AgentsProps = { onEvaluationCreated: (run: Run) => void; onAgentStateChange: (value: AgentSummary | null) => void };
+type AgentsProps = { onEvaluationCreated: (run: Run) => void };
 type AgentMode = "catalog" | "connect";
 type CatalogState = "loading" | "loaded" | "empty" | "error";
 
@@ -63,7 +62,7 @@ function AgentCatalog({ agents, state, onRetry, onConnect, onRefresh }: { agents
   </section>;
 }
 
-export default function Agents({ onEvaluationCreated, onAgentStateChange }: AgentsProps) {
+export default function Agents({ onEvaluationCreated }: AgentsProps) {
   const [mode, setMode] = useState<AgentMode>("catalog");
   const [catalog, setCatalog] = useState<AgentCatalogEntry[]>([]);
   const [catalogState, setCatalogState] = useState<CatalogState>("loading");
@@ -77,10 +76,6 @@ export default function Agents({ onEvaluationCreated, onAgentStateChange }: Agen
   const [error, setError] = useState("");
   const [pairingRefreshRequested, setPairingRefreshRequested] = useState(0);
   const completing = useRef(false);
-
-  useEffect(() => {
-    onAgentStateChange(agent && registration ? { agent, onboarding } : null);
-  }, [agent, onboarding, registration, onAgentStateChange]);
 
   useEffect(() => {
     if (mode !== "catalog") return;
@@ -187,7 +182,6 @@ export default function Agents({ onEvaluationCreated, onAgentStateChange }: Agen
     setOnboarding(null);
     setError("");
     completing.current = false;
-    onAgentStateChange(null);
   }
 
   function refreshCatalog() {

@@ -1,10 +1,10 @@
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { animate } from "animejs";
-import { createRun, eventUrl, getEpisodes, getRun, getRuns, getScore, getVerification, getWeaknesses, stopRun,
-  getMetrics, type Episode, type EvaluationMetrics, type GraphEvent, type Run, type RunInput, type Scorecard, type Verification, type Weakness } from "./api";
+import { createRun, eventUrl, getAgentCatalog, getEpisodes, getRun, getRuns, getScore, getVerification, getWeaknesses, stopRun,
+  getMetrics, type AgentCatalogEntry, type Episode, type EvaluationMetrics, type GraphEvent, type Run, type RunInput, type Scorecard, type Verification, type Weakness } from "./api";
 import { appendEvent, isActive, parseEvent, readable, stageForEvent, stationForStage, stations, stages, type StationId } from "./graph-view";
 import Analysis from "./analysis";
-import Agents, { type AgentSummary } from "./agents";
+import Agents from "./agents";
 import { displayLabel, runLabel } from "./presentation";
 import Select from "./select";
 import ScrollArea from "./scroll-area";
@@ -24,11 +24,18 @@ function Empty({ title, children }: { title: string; children: React.ReactNode }
   return <div className="empty"><span className="empty-pixels" aria-hidden="true"><i /><i /><i /></span><strong>{title}</strong><p>{children}</p></div>;
 }
 
-function ActiveAgentCard({ summary, onOpen }: { summary: AgentSummary | null; onOpen: () => void }) {
-  if (!summary) return <section className="active-agent-card" aria-label="Active agent"><h2>NO AGENT CONNECTED</h2><p>Connect an external trading agent<br />to start an evaluation.</p><button type="button" onClick={onOpen}>Connect agent <span aria-hidden="true">→</span></button></section>;
-  const { agent, onboarding } = summary;
-  const paper = agent.capability_state !== "PAPER_ELIGIBLE" ? "LOCKED" : onboarding?.evaluation.paper ?? "NOT_SUPPORTED";
-  return <section className="active-agent-card" aria-label="Active agent"><h2>ACTIVE AGENT</h2><div className="active-agent-name"><strong>{agent.name}</strong><span className={`active-agent-connection ${agent.status.toLowerCase()}`}><i />{agent.status}</span></div><code>eva-agent/1</code><dl><div><dt>Synthetic</dt><dd>{onboarding?.evaluation.synthetic ?? "READY"}</dd></div><div><dt>Paper</dt><dd>{paper}</dd></div></dl><button type="button" onClick={onOpen}>View agent <span aria-hidden="true">→</span></button></section>;
+type CatalogLoadState = "loading" | "loaded" | "empty" | "error";
+
+function AgentCatalogSummary({ agents, state, onOpen }: { agents: AgentCatalogEntry[]; state: CatalogLoadState; onOpen: () => void }) {
+  if (state === "loading") return <section className="catalog-summary-card" aria-label="Agent catalog"><h2>AGENT CATALOG</h2><p>Loading published agents.</p><button type="button" onClick={onOpen}>View agents <span aria-hidden="true">→</span></button></section>;
+  if (state === "error") return <section className="catalog-summary-card" aria-label="Agent catalog"><h2>AGENT CATALOG</h2><p>Agent catalog unavailable.</p><button type="button" onClick={onOpen}>View agents <span aria-hidden="true">→</span></button></section>;
+  if (state === "empty") return <section className="catalog-summary-card" aria-label="Agent catalog"><h2>AGENT CATALOG</h2><strong className="catalog-summary-empty">NO AGENTS PUBLISHED</strong><p>Connect an external agent to add it to EVA.</p><button type="button" onClick={onOpen}>Connect agent <span aria-hidden="true">→</span></button></section>;
+  if (agents.length === 1) {
+    const entry = agents[0];
+    return <section className="catalog-summary-card" aria-label="Agent catalog"><h2>AGENT CATALOG</h2><div className="catalog-summary-name"><strong>{entry.name}</strong><span className={`catalog-summary-connection ${entry.status.toLowerCase()}`} aria-label={`Connection: ${entry.status}`}><i aria-hidden="true" />{entry.status}</span></div><dl className="catalog-summary-state"><div><dt>Readiness</dt><dd className={`catalog-summary-readiness ${entry.capability_state.toLowerCase()}`}>{entry.capability_state}</dd></div></dl><button type="button" onClick={onOpen}>View agents <span aria-hidden="true">→</span></button></section>;
+  }
+  const onlineCount = agents.filter(entry => entry.status === "ONLINE").length;
+  return <section className="catalog-summary-card" aria-label="Agent catalog"><h2>AGENT CATALOG</h2><div className="catalog-summary-count"><strong>{agents.length} published agents</strong><span>{onlineCount} online</span></div><button type="button" onClick={onOpen}>View agents <span aria-hidden="true">→</span></button></section>;
 }
 
 export default function App() {
@@ -51,7 +58,8 @@ export default function App() {
   const [form, setForm] = useState<RunInput>(initialForm);
   const [busy, setBusy] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
-  const [activeAgent, setActiveAgent] = useState<AgentSummary | null>(null);
+  const [catalog, setCatalog] = useState<AgentCatalogEntry[]>([]);
+  const [catalogState, setCatalogState] = useState<CatalogLoadState>("loading");
   const [view, setView] = useState<"observatory" | "analysis" | "agents">("observatory");
   const [paused, setPaused] = useState(false);
   const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -81,6 +89,18 @@ export default function App() {
     }).catch(() => { if (!disposed) setConnection("offline"); });
     return () => { disposed = true; };
   }, [retry]);
+
+  useEffect(() => {
+    let disposed = false;
+    getAgentCatalog().then(entries => {
+      if (disposed) return;
+      setCatalog(entries);
+      setCatalogState(entries.length ? "loaded" : "empty");
+    }).catch(() => {
+      if (!disposed) setCatalogState("error");
+    });
+    return () => { disposed = true; };
+  }, []);
 
   useEffect(() => {
     setRun(null); setEpisodes([]); setScore(null); setMetrics(null); setWeaknesses([]); setVerification(null); setEvents([]); setStage(null);
@@ -174,7 +194,7 @@ export default function App() {
       <div className={`connection ${connection}`} role="status"><i />{connection === "online" ? "API connected" : connection === "connecting" ? "Connecting" : "API offline"}</div>
     </header>
     <main id="main" className={view === "observatory" ? "observatory-layout" : view === "agents" ? "agents-layout" : undefined}>
-      {view === "analysis" ? <Analysis runs={runs} runId={runId} run={run} episodes={episodes} score={score} metrics={metrics} weaknesses={weaknesses} verification={verification} onRunChange={setRunId} /> : view === "agents" ? <Agents onEvaluationCreated={value => { setRuns(previous => [value, ...previous]); setRunId(value.id); setTab("Activity"); setView("observatory"); }} onAgentStateChange={setActiveAgent} /> : <>
+      {view === "analysis" ? <Analysis runs={runs} runId={runId} run={run} episodes={episodes} score={score} metrics={metrics} weaknesses={weaknesses} verification={verification} onRunChange={setRunId} /> : view === "agents" ? <Agents onEvaluationCreated={value => { setRuns(previous => [value, ...previous]); setRunId(value.id); setTab("Activity"); setView("observatory"); }} /> : <>
       <section className="page-heading">
         <div><div className="breadcrumb">Workspace <span>/</span> Observatory</div><h1>Watch your agent being tested.</h1><p>Start an evaluation, follow each step, then review the results in Analysis.</p></div>
         <div className="heading-actions"><button className="button primary" onClick={() => { setError(""); setConfigOpen(true); dialog.current?.showModal(); }}><span aria-hidden="true">+</span> New evaluation</button></div>
@@ -232,7 +252,7 @@ export default function App() {
         <div><span>Observed failures</span><strong className={failures > 0 ? "failure-number" : ""}>{measured ? String(failures).padStart(2, "0") : "—"}</strong><p>{measured ? `${Math.round(failures / episodes.length * 100)}% of evaluated episodes` : "No results to grade"}</p></div>
       </section>
       </div>
-      <ActiveAgentCard summary={activeAgent} onOpen={() => setView("agents")} />
+      <AgentCatalogSummary agents={catalog} state={catalogState} onOpen={() => setView("agents")} />
       <footer><span>EVA <span className="footer-divider">/</span> Adaptive trading-agent evaluation</span></footer></>}
     </main>
 
