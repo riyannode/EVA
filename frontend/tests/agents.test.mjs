@@ -33,6 +33,31 @@ test("Agents defaults to a public catalog with resilient state transitions", asy
   assert.match(source, /entry\.capabilities/);
 });
 
+test("catalog cards are collapsed native disclosures with high-signal summaries", async () => {
+  const source = await readFile(new URL("../agents.tsx", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const card = source.split("function CatalogAgentCard")[1]?.split("function CatalogSkeleton")[0] ?? "";
+  const summary = card.split('<summary className="catalog-agent-header">')[1]?.split("</summary>")[0] ?? "";
+  assert.match(card, /<details className="catalog-agent-card">/);
+  assert.match(card, /<summary className="catalog-agent-header">/);
+  assert.match(summary, /entry\.name/);
+  assert.match(summary, /ConnectionStatus/);
+  assert.doesNotMatch(summary, /declared_model|framework|capability_state|evaluation_count|capabilities/);
+  assert.match(card, /className="catalog-agent-details"/);
+  assert.doesNotMatch(card, /<details className="catalog-agent-card" open/);
+  assert.match(styles, /catalog-agent-card\[open\]/);
+});
+
+test("catalog renders each entry in the responsive product grid", async () => {
+  const source = await readFile(new URL("../agents.tsx", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(source, /className="catalog-surface"/);
+  assert.match(source, /agents\.map\(entry => <CatalogAgentCard/);
+  assert.match(styles, /\.catalog-grid \{[^}]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/s);
+  assert.match(styles, /@media \(max-width: 1100px\)[\s\S]*\.catalog-grid \{ grid-template-columns: repeat\(2/);
+  assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.catalog-grid \{ grid-template-columns: 1fr/);
+});
+
 test("public catalog card never renders private agent fields", async () => {
   const source = await readFile(new URL("../agents.tsx", import.meta.url), "utf8");
   const card = source.split("function CatalogAgentCard")[1]?.split("function CatalogSkeleton")[0] ?? "";

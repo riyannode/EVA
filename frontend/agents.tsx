@@ -16,49 +16,51 @@ function ConnectionStatus({ status }: { status: AgentCatalogEntry["status"] }) {
 
 function CatalogAgentCard({ entry }: { entry: AgentCatalogEntry }) {
   const titleId = `catalog-agent-${entry.agent_id}`;
-  return <article className="catalog-agent-card" aria-labelledby={titleId}>
-    <header className="catalog-agent-header">
+  return <details className="catalog-agent-card">
+    <summary className="catalog-agent-header">
       <div className="catalog-agent-title"><span className="catalog-agent-marker" aria-hidden="true" /><h2 id={titleId}>{entry.name}</h2></div>
-      <div className="catalog-connection"><span>Connection</span><ConnectionStatus status={entry.status} /></div>
-    </header>
-    <div className="catalog-identity">
-      <strong>{entry.declared_model}</strong>
-      <span>v{entry.version}{entry.framework ? <><span aria-hidden="true"> · </span><span className="catalog-framework">{entry.framework}</span></> : null}</span>
+      <div className="catalog-summary-end"><ConnectionStatus status={entry.status} /><span className="catalog-expand" aria-hidden="true" /></div>
+    </summary>
+    <div className="catalog-agent-details">
+      <div className="catalog-identity">
+        <strong>{entry.declared_model}</strong>
+        <span>v{entry.version}</span>
+        {entry.framework ? <span className="catalog-framework">{entry.framework}</span> : null}
+      </div>
+      <div className="catalog-state-grid" aria-label={`${entry.name} state`}>
+        <div><span>Connection</span><strong className={`catalog-state-value ${entry.status.toLowerCase()}`}>{entry.status}</strong></div>
+        <div><span>Readiness</span><strong className={`catalog-state-value ${entry.capability_state.toLowerCase()}`}>{entry.capability_state}</strong></div>
+      </div>
+      <dl className="catalog-facts">
+        <div><dt>Provider</dt><dd>{entry.execution_providers.length ? entry.execution_providers.map(providerLabel).join(", ") : "None declared"}</dd></div>
+        <div><dt>Protocol</dt><dd>{entry.protocol_version}</dd></div>
+        <div><dt>Evaluations</dt><dd>{entry.evaluation_count} {entry.evaluation_count === 1 ? "evaluation" : "evaluations"}</dd></div>
+      </dl>
+      <div className="catalog-capabilities" aria-label={`${entry.name} capabilities`}>
+        <span className="catalog-field-label">Capabilities</span>
+        {entry.capabilities.length ? <div className="catalog-capability-list">{entry.capabilities.map(capability => <span className="catalog-capability" key={capability}>{capability}</span>)}</div> : <span className="catalog-none">None declared</span>}
+      </div>
     </div>
-    <div className="catalog-state-grid" aria-label={`${entry.name} state`}>
-      <div><span>Connection</span><strong className={`catalog-state-value ${entry.status.toLowerCase()}`}>{entry.status}</strong></div>
-      <div><span>Readiness</span><strong className={`catalog-state-value ${entry.capability_state.toLowerCase()}`}>{entry.capability_state}</strong></div>
-    </div>
-    <dl className="catalog-facts">
-      <div><dt>Provider</dt><dd>{entry.execution_providers.length ? entry.execution_providers.map(providerLabel).join(", ") : "None declared"}</dd></div>
-      <div><dt>Protocol</dt><dd>{entry.protocol_version}</dd></div>
-      <div><dt>Evaluations</dt><dd>{entry.evaluation_count} {entry.evaluation_count === 1 ? "evaluation" : "evaluations"}</dd></div>
-    </dl>
-    <div className="catalog-capabilities" aria-label={`${entry.name} capabilities`}>
-      <span className="catalog-field-label">Capabilities</span>
-      {entry.capabilities.length ? <div className="catalog-capability-list">{entry.capabilities.map(capability => <span className="catalog-capability" key={capability}>{capability}</span>)}</div> : <span className="catalog-none">None declared</span>}
-    </div>
-  </article>;
+  </details>;
 }
 
 function CatalogSkeleton() {
   return <div className="catalog-grid" role="status" aria-label="Loading agent catalog" aria-busy="true">
-    <article className="catalog-agent-card catalog-skeleton" aria-hidden="true"><div /><div /><div /><div /></article>
+    <article className="catalog-agent-card catalog-skeleton" aria-hidden="true"><div /><div /></article>
   </div>;
 }
 
 function AgentCatalog({ agents, state, onRetry, onConnect, onRefresh }: { agents: AgentCatalogEntry[]; state: CatalogState; onRetry: () => void; onConnect: () => void; onRefresh: () => void }) {
-  return <>
+  return <section className="catalog-surface" aria-label="Published agents">
     <div className="catalog-toolbar">
-      <div className="catalog-count"><span>Published agents</span><strong>{agents.length}</strong></div>
-      <p>Agents that opted into the EVA catalog. Inspect their connection state and evaluation readiness.</p>
+      <div className="catalog-count"><span>Published agents</span><strong>{agents.length} available</strong></div>
       <button type="button" className="catalog-refresh" onClick={onRefresh} disabled={state === "loading"}>Refresh</button>
     </div>
     {state === "loading" && <CatalogSkeleton />}
     {state === "error" && <div className="catalog-inline-error" role="alert"><div><strong>Agent catalog unavailable.</strong><span>Check the API connection and try again.</span></div><button type="button" className="button" onClick={onRetry}>Retry</button></div>}
     {state === "empty" && <section className="catalog-empty" aria-labelledby="catalog-empty-title"><span className="catalog-empty-mark" aria-hidden="true"><i /><i /><i /></span><h2 id="catalog-empty-title">NO PUBLISHED AGENTS</h2><p>Agents appear here after pairing and explicit catalog publication.</p><button type="button" className="button primary" onClick={onConnect}>Connect agent</button></section>}
     {(state === "loaded" || (state === "error" && agents.length > 0)) && <div className="catalog-grid">{agents.map(entry => <CatalogAgentCard entry={entry} key={entry.agent_id} />)}</div>}
-  </>;
+  </section>;
 }
 
 export default function Agents({ onEvaluationCreated, onAgentStateChange }: AgentsProps) {
@@ -196,7 +198,7 @@ export default function Agents({ onEvaluationCreated, onAgentStateChange }: Agen
   const prompt = pairing ? `Connect my existing trading agent to EVA.\n\nPairing request: ${pairing.request_id}\n\nUse the EVA CLI or SDK. Check pairing status. After approval, store the returned agent credential in the runtime environment. Connect outbound using eva-agent/1. Run the non-financial connection test. Stop before PAPER evaluation.` : "";
   return <div className="agents-page" aria-labelledby="agents-title">
     <section className="page-heading agents-heading">
-      <div><div className="breadcrumb">Workspace <span>/</span> Agents{mode === "connect" && <><span>/</span> Connect</>}</div><h1 id="agents-title">{mode === "catalog" ? "Agent catalog" : "Connect an external agent."}</h1><p>{mode === "catalog" ? "Agents that opted into the EVA catalog. Inspect their connection state and evaluation readiness." : "Pair an existing agent, connect it outbound, and start with a zero-write synthetic evaluation."}</p></div>
+      <div><div className="breadcrumb">Workspace <span>/</span> Agents{mode === "connect" && <><span>/</span> Connect</>}</div><h1 id="agents-title">{mode === "catalog" ? "Agent catalog" : "Connect an external agent."}</h1><p>{mode === "catalog" ? "Discover agents connected to EVA and inspect their evaluation readiness." : "Pair an existing agent, connect it outbound, and start with a zero-write synthetic evaluation."}</p></div>
       <div className="heading-actions">{mode === "catalog" ? <button type="button" className="button primary" onClick={() => setMode("connect")}><span aria-hidden="true">+</span> Connect agent</button> : <button type="button" className="button back-button" onClick={() => setMode("catalog")}><span aria-hidden="true">←</span> Back to agents</button>}</div>
     </section>
     {mode === "catalog" ? <AgentCatalog agents={catalog} state={catalogState} onRetry={refreshCatalog} onConnect={() => setMode("connect")} onRefresh={refreshCatalog} /> : <>
