@@ -53,7 +53,8 @@ test("catalog renders each entry in the responsive product grid", async () => {
   const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
   assert.match(source, /className="catalog-surface"/);
   assert.match(source, /agents\.map\(entry => <CatalogAgentCard/);
-  assert.match(styles, /\.catalog-grid \{[^}]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/s);
+  assert.match(styles, /\.catalog-surface \{[^}]*width: 100%/s);
+  assert.match(styles, /\.catalog-grid \{[^}]*grid-template-columns: repeat\(3, minmax\(0, 420px\)\)/s);
   assert.match(styles, /@media \(max-width: 1100px\)[\s\S]*\.catalog-grid \{ grid-template-columns: repeat\(2/);
   assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.catalog-grid \{ grid-template-columns: 1fr/);
 });
